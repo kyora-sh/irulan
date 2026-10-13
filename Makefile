@@ -1,6 +1,6 @@
 PY := python3 -I
 
-.PHONY: extract-cc rescrub stats test
+.PHONY: extract-cc rescrub stats test generate check-pairs sample review
 
 # Walk ~/.claude/projects, write data/raw + data/clean + entity candidates.
 extract-cc:
@@ -15,3 +15,20 @@ stats:
 
 test:
 	$(PY) pipeline.py test
+
+# Back-translate clean messages into assistant-style inputs, e.g.
+#   make generate ARGS="--backend codex --model luna --run luna_try --limit 20"
+generate:
+	$(PY) pipeline.py generate $(ARGS)
+
+# Flag rates for generated pairs: make check-pairs ARGS="data/pairs/luna_try.jsonl"
+check-pairs:
+	$(PY) pipeline.py check-pairs $(ARGS)
+
+# Fixed stratified 50-message sample for model comparisons.
+sample:
+	$(PY) pipeline.py sample $(ARGS)
+
+# Side-by-side review: make review ARGS="--runs data/pairs/a.jsonl data/pairs/b.jsonl"
+review:
+	$(PY) pipeline.py review $(ARGS)

@@ -108,3 +108,47 @@ output, the candidates and the stats without walking the transcripts again.
 make stats               # print data/stats/cc_stats.json
 make test                # stdlib unittest, invented fixtures only
 ```
+
+## Step 2: generating the input side
+
+```sh
+make sample                                   # fixed 50-message sample
+make generate ARGS="--backend codex --model luna --run luna_s50 \
+  --ids data/samples/sample50.jsonl --variants assigned"
+make check-pairs ARGS="data/pairs/luna_s50.jsonl"
+make review ARGS="--runs data/pairs/luna_s50.jsonl data/pairs/sol_s50.jsonl"
+```
+
+`irulan/generate.py` asks a model how an LLM assistant would have written
+each clean message (same meaning, asks, facts and placeholders; assistant
+register; no preamble; roughly 1.5-2x the length through phrasing only) and
+writes `{id, backend, model, variant, input, target, meta}` lines to
+`data/pairs/<run>.jsonl`. The prompt and its examples are invented and
+versioned (`--prompt-version`, recorded in `meta.prompt_version`).
+
+Backends:
+
+| backend | what | notes |
+|---|---|---|
+| `codex` | `codex exec -m <model>` | runs in a fresh empty temp dir (`--tmp-root` / `IRULAN_TMP`) with `-s read-only --skip-git-repo-check --ephemeral --json`; the prompt goes on stdin and the last agent message is the output. Aliases: `sol` = `gpt-6.1-sol`, `luna` = `gpt-6-luna`. `--effort` sets `model_reasoning_effort` (default `low`). |
+| `openrouter` | chat completions, default `qwen/qwen3.8-flash` | key from `OPENROUTER_API_KEY` or a git-ignored `.env` in the repo root; without a key the run prints `skipped: no key` and exits 0. |
+| `fake` | no network | deterministic output, for tests and dry runs. |
+
+Variants: `plain` (prose, no markdown) and `formatted` (light markdown, only
+for messages of 30+ words; shorter ones get the plain rules). `--variants
+random` picks one per message with a seeded RNG (same choice for every
+model), `both` writes both, `assigned` takes the `variant` field from
+`--ids`.
+
+Runs use a small worker pool (`--workers`, default 4) with retries and
+exponential backoff, and are resumable: pairs already in the output file are
+skipped and new ones are appended as they finish. Every attempt is logged to
+`data/pairs/<run>.log.jsonl` with latency and token usage.
+
+`irulan/check_pairs.py` flags inputs that add or drop placeholders, are
+shorter than the target, exceed 4x its length, open with a preamble, look like
+they answer the target's question, use markdown in a plain variant, or came
+from a call that ran tools. `sample` picks 15 messages of 15-29 words, 20 of
+30-59 and 15 of 60+ (skipping mostly-placeholder ones) and splits them evenly
+between the two variants; `review` writes a side-by-side markdown file and a
+per-model summary to `data/review/`.

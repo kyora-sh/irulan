@@ -3,6 +3,10 @@ data/
 *.local.*
 scrub/denylist.txt
 
+# API keys (OPENROUTER_API_KEY) live here, never in git.
+.env
+.env.*
+
 # Python
 __pycache__/
 *.pyc

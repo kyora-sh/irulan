@@ -7,6 +7,10 @@ directory explicitly and dispatches to the package.
     python3 -I pipeline.py rescrub
     python3 -I pipeline.py stats
     python3 -I pipeline.py test
+    python3 -I pipeline.py generate --backend codex|openrouter|fake --run NAME ...
+    python3 -I pipeline.py check-pairs data/pairs/NAME.jsonl ...
+    python3 -I pipeline.py sample
+    python3 -I pipeline.py review --runs data/pairs/A.jsonl data/pairs/B.jsonl
 """
 
 import os
@@ -33,6 +37,18 @@ def main():
         path = rest[0] if rest else "data/stats/cc_stats.json"
         with open(path, encoding="utf-8") as f:
             print(stats.render(json.load(f)))
+    elif cmd == "generate":
+        from irulan import generate
+        sys.exit(generate.main(rest))
+    elif cmd == "check-pairs":
+        from irulan import check_pairs
+        check_pairs.main(rest)
+    elif cmd == "sample":
+        from irulan import sample
+        sample.main_sample(rest)
+    elif cmd == "review":
+        from irulan import sample
+        sample.main_review(rest)
     elif cmd == "test":
         import unittest
         suite = unittest.defaultTestLoader.discover(os.path.join(HERE, "tests"), top_level_dir=HERE)
