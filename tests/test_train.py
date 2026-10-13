@@ -265,6 +265,25 @@ class RemoteHelperTests(unittest.TestCase):
             a = block.split("**A**", 1)[1].split("**B**", 1)[0]
             self.assertEqual("model" in a, v["model"] == "A")
 
+    def test_input_rows_have_no_target_and_the_training_prompt(self):
+        system = mt.system_prompt("system_v1")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "inputs.jsonl")
+            with open(path, "w") as f:
+                f.write(json.dumps({"id": "g1", "input": "Please merge it."}) + "\n\n")
+                f.write(json.dumps({"text": "Second text."}) + "\n")
+                f.write(json.dumps({"id": "g3", "input": "Third."}) + "\n")
+            rows = mt.input_rows(path, system, limit=2)
+            self.assertEqual([r["id"] for r in rows], ["g1", "3"])
+            self.assertEqual([m["role"] for m in rows[0]["messages"]], ["system", "user"])
+            self.assertEqual(rows[0]["messages"][0]["content"], system)
+            with open(path, "a") as f:
+                f.write(json.dumps({"id": "bad", "input": "  "}) + "\n")
+            with self.assertRaises(SystemExit):
+                mt.input_rows(path, system)
+        with self.assertRaises(SystemExit):
+            mt.system_prompt("system_v0")
+
 
 if __name__ == "__main__":
     unittest.main()

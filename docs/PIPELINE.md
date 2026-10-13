@@ -316,7 +316,9 @@ for cents before the 27B run.
 `train` uploads the data, fills the HF cache volume (`irulan-hf-cache`) on a
 CPU container, then trains on one GPU (H100 80GB by default). Outputs go to
 the `irulan-runs` volume under the run name: `checkpoints/` (latest and
-best), `adapter/` (the best checkpoint's adapter), `log.jsonl`, `config.json`,
+best), `adapter/` (the best checkpoint's adapter), `epoch-N/` (the adapter at
+the end of each epoch; an epoch end is also evaluated and checkpointed, so it
+competes for best), `log.jsonl`, `config.json`,
 `steps.jsonl` (seconds, tokens and peak memory per step) and `summary.json`
 (load time, mean step time, tokens/s, peak memory, losses). Fetch them with
 `modal volume get irulan-runs NAME/adapter`.
@@ -351,3 +353,8 @@ supports Qwen3.8 and is an option if speed matters.
 `data/eval/NAME/test_adapter.jsonl` (`id`, `input`, `model`, `target`), a
 blind side-by-side `test_adapter_blind.md` (A/B in seeded random order) and
 its key, `test_adapter_blind_key.json`.
+
+`--inputs FILE.jsonl` (`{id, input}` per line) rewrites texts from outside the
+splits instead, with the training system prompt (`--system`, default
+`system_v1`); there is no target, so it writes only
+`data/eval/NAME/inputs-FILE_adapter.jsonl`.

@@ -291,6 +291,35 @@ def validate_split(path):
     return recs, problems
 
 
+def system_prompt(version):
+    """The versioned system prompt the training set was built with."""
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from irulan.prepare import SYSTEM_PROMPTS
+    if version not in SYSTEM_PROMPTS:
+        raise SystemExit("unknown --system %r (known: %s)" % (version, ", ".join(sorted(SYSTEM_PROMPTS))))
+    return SYSTEM_PROMPTS[version]
+
+
+def input_rows(path, system, limit=0):
+    """Chat rows (system + user, no target) from a jsonl of {"id", "input"}
+    records ("text" also works), for eval on texts outside the splits."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            text = r.get("input") if r.get("input") is not None else r.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise SystemExit("%s:%d: needs a non-empty \"input\" (or \"text\")" % (path, n))
+            rows.append({"id": r.get("id", str(n)), "messages": [
+                {"role": "system", "content": system}, {"role": "user", "content": text}]})
+            if limit and len(rows) >= limit:
+                break
+    return rows
+
+
 def record_tokens(r):
     return est_tokens([m["content"] for m in r["messages"]]) + TEMPLATE_OVERHEAD_TOKENS
 
@@ -574,6 +603,19 @@ def run_training(cfg):
             with open(os.path.join(run_dir, "log.jsonl"), "a") as f:
                 f.write(json.dumps(dict(logs or {}, step=state.global_step)) + "\n")
 
+        def on_epoch_end(self, args, state, control, model=None, **kw):
+            # Keep each epoch's adapter (the checkpoints rotate), and evaluate
+            # and checkpoint the epoch end so it competes for best by val loss.
+            # The last step is evaluated and saved by the trainer already.
+            n = int(round(state.epoch or 0))
+            model.save_pretrained(os.path.join(run_dir, "epoch-%d" % n))
+            runs_vol.commit()
+            print("epoch %d ended at step %d; adapter saved to epoch-%d/" % (n, state.global_step, n))
+            if state.global_step < state.max_steps and state.global_step % eval_steps:
+                control.should_evaluate = True
+                control.should_save = True
+            return control
+
         def on_step_begin(self, args, state, control, **kw):
             meter["t"], meter["real"], meter["padded"] = time.time(), 0, 0
 
@@ -676,7 +718,8 @@ def run_eval(cfg):
         model = PeftModel.from_pretrained(model, os.path.join(run_dir, "adapter"))
     model.eval()
     tok.padding_side = "left"
-    rows = _read_jsonl(os.path.join(DATA_MOUNT, cfg["data_subdir"], "%s.jsonl" % cfg["split"]), cfg["limit"])
+    rows = cfg.get("rows") or _read_jsonl(
+        os.path.join(DATA_MOUNT, cfg["data_subdir"], "%s.jsonl" % cfg["split"]), cfg["limit"])
     import time
     t_gen, new_tokens = time.time(), 0
     stop = [tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")]
@@ -697,7 +740,7 @@ def run_eval(cfg):
         for r, g in zip(batch, new):
             out.append({"id": r.get("id"), "input": r["messages"][1]["content"],
                         "model": tok.decode(g, skip_special_tokens=True).strip(),
-                        "target": r["messages"][2]["content"]})
+                        "target": r["messages"][2]["content"] if len(r["messages"]) > 2 else None})
         print("generated %d/%d (%.0f s, %d new tokens so far, peak %.1f GB)" % (
             len(out), len(rows), time.time() - t_gen, new_tokens, torch.cuda.max_memory_allocated() / 1e9))
     tag = "base" if cfg["no_adapter"] else "adapter"
@@ -915,12 +958,21 @@ def train(args):
 def evaluate(args):
     if not args.confirm_spend:
         raise Refused("eval starts a paid %s job; rerun with --confirm-spend once spending is approved." % args.gpu)
-    print("eval: run %s, %s split of %s, limit %s, max_new_tokens %d, batch %d" % (
-        args.run, args.split, args.data_subdir, args.limit or "none", args.max_new_tokens, args.eval_batch))
+    rows, split = None, args.split
+    if args.inputs:
+        # Texts without targets: sent with the job, named after the file.
+        rows = input_rows(args.inputs, system_prompt(args.system), args.limit)
+        split = "inputs-" + os.path.splitext(os.path.basename(args.inputs))[0]
+        print("eval: run %s, %d texts from %s (system %s), max_new_tokens %d, batch %d" % (
+            args.run, len(rows), args.inputs, args.system, args.max_new_tokens, args.eval_batch))
+    else:
+        print("eval: run %s, %s split of %s, limit %s, max_new_tokens %d, batch %d" % (
+            args.run, args.split, args.data_subdir, args.limit or "none", args.max_new_tokens, args.eval_batch))
     print_ceiling(args)
     _guard(args)
-    cfg = _cfg(args, confirm_spend=True, split=args.split, limit=args.limit, no_adapter=args.no_adapter,
-               max_new_tokens=args.max_new_tokens, temperature=args.temperature, eval_batch=args.eval_batch)
+    cfg = _cfg(args, confirm_spend=True, split=split, limit=args.limit, no_adapter=args.no_adapter,
+               max_new_tokens=args.max_new_tokens, temperature=args.temperature, eval_batch=args.eval_batch,
+               rows=rows)
     with modal.enable_output():
         with app.run(environment_name=args.modal_env or None):
             download_model.remote(args.base_model, args.base_revision)
@@ -928,13 +980,16 @@ def evaluate(args):
     out_dir = os.path.join(ROOT, "data/eval", args.run)
     os.makedirs(out_dir, exist_ok=True)
     tag = "base" if args.no_adapter else "adapter"
-    with open(os.path.join(out_dir, "%s_%s.jsonl" % (args.split, tag)), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir, "%s_%s.jsonl" % (split, tag)), "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    if rows is not None:
+        print("wrote %d outputs to %s/%s_%s.jsonl" % (len(records), os.path.relpath(out_dir, ROOT), split, tag))
+        return
     md, key = blind_side_by_side(records)
-    with open(os.path.join(out_dir, "%s_%s_blind.md" % (args.split, tag)), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir, "%s_%s_blind.md" % (split, tag)), "w", encoding="utf-8") as f:
         f.write(md)
-    with open(os.path.join(out_dir, "%s_%s_blind_key.json" % (args.split, tag)), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir, "%s_%s_blind_key.json" % (split, tag)), "w", encoding="utf-8") as f:
         json.dump(key, f, indent=2)
     print("wrote %d outputs to %s (blind side-by-side + key)" % (len(records), os.path.relpath(out_dir, ROOT)))
 
@@ -994,6 +1049,9 @@ def build_parser():
     e.add_argument("--max-new-tokens", type=int, default=512)
     e.add_argument("--temperature", type=float, default=0.7)
     e.add_argument("--eval-batch", type=int, default=16)
+    e.add_argument("--inputs", default=None,
+                   help="jsonl of {id, input} texts to rewrite instead of a split (no targets, no blind file)")
+    e.add_argument("--system", default="system_v1", help="system prompt version for --inputs")
 
     u = sub.add_parser("upload", help="put data/train on the irulan-data volume")
     common(u)
