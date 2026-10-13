@@ -122,6 +122,8 @@ _ASSIGN_EQ = _w(
     r"access[_-]?key|private[_-]?key|client[_-]?secret|auth|credentials?))"
     r"(\s*=\s*|\s*:\s*)(['\"]?)([^\s'\"`,;)&]{4,})"
 )
+# "root pwd is <value>" / "the password was <value>": prose that hands over a credential.
+_SAID_PASSWORD = _w(r"(?i)\b(password|passwd|passwort|pwd|pw)(\s+(?:is|was|=)\s+)(['\"]?)(\S{6,})")
 _URL = _w(r"\b(?:https?|wss?|ftp|ssh|file)://[^\s<>\"'`)\]}]+")
 _BARE_URL = _w(
     r"(?<![\w@./-])((?:[a-z0-9-]+\.)+(?:com|ai|io|dev|net|org|app|co|run|cloud|so|xyz|tech|gg|me|us|eu|de|ch|uk|sh))"
@@ -203,6 +205,7 @@ class Scrubber:
         t = sub("url", _BARE_URL, _bare_url_repl, t)
         t = sub("email", _EMAIL, "<EMAIL>", t)
         t = sub("secret", _ASSIGN_EQ, _assign_repl, t)
+        t = sub("secret", _SAID_PASSWORD, _said_password_repl, t)
         t = sub("path", _HOME_PATH, _path_repl, t)
         t = sub("path", _ABS_PATH, _path_repl, t)
         t = sub("path", _ABS_FILE, _path_repl, t)
@@ -306,6 +309,14 @@ def _assign_repl(m):
         # key=value with a plain word ("auth=none", "key=name") is config talk.
         return None
     return name + sep + quote + "<SECRET>"
+
+
+def _said_password_repl(m):
+    value = m.group(4).rstrip(".,;:!?)")
+    # "the password is wrong" / "pwd is <SECRET>" are not credentials
+    if value.startswith("<") or (value.isalpha() and value.islower()):
+        return None
+    return m.group(1) + m.group(2) + m.group(3) + "<SECRET>" + m.group(4)[len(value):]
 
 
 def _path_repl(m):

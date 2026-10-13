@@ -50,6 +50,12 @@ class SecretTests(unittest.TestCase):
         out, _ = self.scrub("the key: speed matters more")
         self.assertEqual(out, "the key: speed matters more")
 
+    def test_password_in_prose(self):
+        out, _ = self.scrub("root pwd is x9@Fake" + "Pass42 for the box")
+        self.assertEqual(out, "root pwd is <SECRET> for the box")
+        out, _ = self.scrub("the password is wrong again")
+        self.assertEqual(out, "the password is wrong again")
+
     def test_private_key_and_connection_string(self):
         pem = "-----BEGIN " + "PRIVATE KEY-----\nAAAAfakefake\n-----END " + "PRIVATE KEY-----"
         out, _ = self.scrub("here:\n" + pem + "\nthanks")
