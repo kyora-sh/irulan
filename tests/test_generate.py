@@ -44,7 +44,6 @@ class PromptTests(unittest.TestCase):
     def test_aliases(self):
         self.assertEqual(generate.make_backend("codex", "sol").model, "gpt-6.1-sol")
         self.assertEqual(generate.make_backend("codex", "luna").model, "gpt-6-luna")
-        self.assertEqual(generate.make_backend("openrouter").model, "qwen/qwen3.8-flash")
 
 
 class RunnerTests(unittest.TestCase):
@@ -67,11 +66,6 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(all(o["target"] in (r["text"] for r in recs) for o in out))
             with open(os.path.join(d, "t.log.jsonl")) as f:
                 self.assertEqual(len(f.readlines()), 4)
-
-    def test_openrouter_without_key_is_skipped(self):
-        b = generate.OpenRouterBackend("qwen/qwen3.8-flash")
-        b.key = None
-        self.assertEqual(b.available(), (False, "skipped: no key"))
 
 
 class CheckTests(unittest.TestCase):

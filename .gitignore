@@ -3,7 +3,7 @@ data/
 *.local.*
 scrub/denylist.txt
 
-# API keys (OPENROUTER_API_KEY) live here, never in git.
+# Local secrets, never in git.
 .env
 .env.*
 

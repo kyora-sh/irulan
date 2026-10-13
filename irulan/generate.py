@@ -6,7 +6,6 @@ assistant would have drafted the same message. Each output line is
     {id, backend, model, variant, input, target, meta}
 
     python3 -I pipeline.py generate --backend codex --model luna --run luna_try
-    python3 -I pipeline.py generate --backend openrouter --run qwen_try
     python3 -I pipeline.py generate --backend fake --run dry --limit 5
 
 Runs are resumable: records already in data/pairs/<run>.jsonl are skipped, new
@@ -27,8 +26,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PROMPT_VERSION = "v2"
@@ -38,9 +35,8 @@ FORMATTED_MIN_WORDS = 30
 MODEL_ALIASES = {
     "sol": "gpt-6.1-sol",
     "luna": "gpt-6-luna",
-    "qwen": "qwen/qwen3.8-flash",
 }
-DEFAULT_MODELS = {"codex": "gpt-6-luna", "openrouter": "qwen/qwen3.8-flash", "fake": "fake-1"}
+DEFAULT_MODELS = {"codex": "gpt-6-luna", "fake": "fake-1"}
 
 # ---------------------------------------------------------------------------
 # Prompt. Every example in it is invented.
@@ -264,59 +260,7 @@ class CodexBackend(Backend):
             shutil.rmtree(work, ignore_errors=True)
 
 
-def load_dotenv(path):
-    env = {}
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip().strip("'\"")
-    return env
-
-
-class OpenRouterBackend(Backend):
-    name = "openrouter"
-    URL = "https://openrouter.ai/api/v1/chat/completions"
-
-    def __init__(self, model, **opts):
-        super().__init__(model, **opts)
-        self.key = os.environ.get("OPENROUTER_API_KEY") or load_dotenv(os.path.join(ROOT, ".env")).get("OPENROUTER_API_KEY")
-
-    def available(self):
-        if not self.key:
-            return False, "skipped: no key"
-        return True, ""
-
-    def call(self, prompt):
-        body = {"model": self.model, "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.opts.get("temperature", 0.7)}
-        if self.opts.get("effort"):
-            body["reasoning"] = {"effort": self.opts["effort"]}
-        req = urllib.request.Request(self.URL, data=json.dumps(body).encode("utf-8"), method="POST", headers={
-            "Authorization": "Bearer " + self.key,
-            "Content-Type": "application/json",
-            "X-Title": "irulan",
-        })
-        try:
-            with urllib.request.urlopen(req, timeout=self.opts.get("timeout", 120)) as r:
-                data = json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:300]
-            raise BackendError("HTTP %d: %s" % (e.code, detail), retryable=e.code == 429 or e.code >= 500)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise BackendError("network: %s" % e)
-        try:
-            text = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError):
-            raise BackendError("bad response: %s" % json.dumps(data)[:300])
-        if not text.strip():
-            raise BackendError("empty output")
-        return {"text": text, "usage": data.get("usage") or {}, "meta": {}}
-
-
-BACKENDS = {"codex": CodexBackend, "openrouter": OpenRouterBackend, "fake": FakeBackend}
+BACKENDS = {"codex": CodexBackend, "fake": FakeBackend}
 
 
 def make_backend(name, model=None, **opts):
@@ -457,7 +401,7 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--retries", type=int, default=3)
-    ap.add_argument("--effort", default="low", help="reasoning effort (codex: low|medium|high; '' to leave unset)")
+    ap.add_argument("--effort", default="low", help="codex reasoning effort: low|medium|high ('' to leave unset)")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--tmp-root", default=os.environ.get("IRULAN_TMP"),
                     help="where codex's empty per-call working dirs are created")

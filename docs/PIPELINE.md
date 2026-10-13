@@ -131,7 +131,6 @@ Backends:
 | backend | what | notes |
 |---|---|---|
 | `codex` | `codex exec -m <model>` | runs in a fresh empty temp dir (`--tmp-root` / `IRULAN_TMP`) with `-s read-only --skip-git-repo-check --ephemeral --json`; the prompt goes on stdin and the last agent message is the output. Aliases: `sol` = `gpt-6.1-sol`, `luna` = `gpt-6-luna`. `--effort` sets `model_reasoning_effort` (default `low`). |
-| `openrouter` | chat completions, default `qwen/qwen3.8-flash` | key from `OPENROUTER_API_KEY` or a git-ignored `.env` in the repo root; without a key the run prints `skipped: no key` and exits 0. |
 | `fake` | no network | deterministic output, for tests and dry runs. |
 
 Variants: `plain` (prose, no markdown) and `formatted` (light markdown, only
