@@ -1,14 +1,15 @@
-"""Extract the messages a human typed into Claude Code, then scrub them.
+"""Extract the messages a human typed into Claude Code.
 
-    python3 -I pipeline.py extract-cc   # walk transcripts, write raw + clean
-    python3 -I pipeline.py rescrub      # reapply scrub to the raw extract only
+    irulan extract [--src ~/.claude/projects] [--data-dir data] ...
 
-Outputs (all under data/, which is git-ignored):
-    data/raw/cc_messages.jsonl      filtered, deduped, NOT scrubbed
-    data/clean/cc_messages.jsonl    scrubbed training targets
-    data/entity_candidates.tsv      names to review into scrub/denylist.txt
-    data/stats/cc_stats.json        counts only
-    data/stats/cc_drops.jsonl       every authorship/language drop or strip, with its reason
+Outputs (under the data dir, git-ignored in this repo):
+    raw/cc_messages.jsonl      filtered and deduped, NOT scrubbed
+    stats/cc_stats.json        counts only
+    stats/cc_drops.jsonl       every authorship/language drop or strip, with its reason
+
+Nothing here scrubs names, hosts or secrets: that happens on the platform after
+upload (see docs/API.md). `irulan upload --redact-secrets-locally` removes
+obvious credentials before anything leaves the machine.
 """
 
 import argparse
@@ -18,11 +19,12 @@ import json
 import os
 import sys
 
-from . import entities, filters, stats
-from .scrub import Scrubber
+from . import filters, stats
 
 DEFAULT_SRC = os.path.expanduser("~/.claude/projects")
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Relative to the working directory, so running from a checkout keeps the
+# data/ layout the pipeline has always used.
+DEFAULT_DATA_DIR = "data"
 SHORT_WORDS = 3   # a message this short or shorter counts as a "short" message
 SHORT_CAP = 3     # keep at most this many copies of each distinct short message
 NON_HUMAN_SOURCES = {"system", "sdk"}
@@ -214,62 +216,14 @@ def write_jsonl(records, path):
     os.replace(tmp, path)
 
 
-def read_jsonl(path):
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def rescrub(args, extract_stats=None):
-    raw = read_jsonl(args.raw)
-    scrubber = Scrubber.from_files(args.denylist)
-    totals = collections.Counter()
-    dropped = collections.Counter()
-    clean = []
-    for r in raw:
-        text, counts = scrubber.scrub(r["text"])
-        totals.update(counts)
-        if filters.prose_words(text) == 0:
-            dropped["no_prose_after_scrub"] += 1
-            continue
-        rec = with_meta(r, text)
-        clean.append(rec)
-    # Two raw messages that differ only in a URL or ID are the same target.
-    clean = dedupe(clean, dropped)
-    write_jsonl(clean, args.clean)
-
-    rows = entities.find_candidates((r["text"] for r in clean), min_count=args.min_entity_count)
-    entities.write_tsv(rows, args.entities)
-
-    prev = {}
-    if extract_stats is None and os.path.exists(args.stats):
-        with open(args.stats, encoding="utf-8") as f:
-            prev = json.load(f).get("extract", {})
-    out = {
-        "extract": extract_stats or prev,
-        "raw_messages": len(raw),
-        "dropped_at_scrub": dict(dropped),
-        "clean": stats.summarise(clean),
-        "scrub": dict(totals),
-        "denylist_terms": len(scrubber.denylist),
-        "entity_candidates": len(rows),
-    }
-    stats.write(out, args.stats)
-    print(stats.render(out))
-    print("dropped at scrub: %s" % dict(dropped))
-    print("entity candidates: %d -> %s" % (len(rows), args.entities))
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--src", default=DEFAULT_SRC, help="Claude Code projects dir")
-    ap.add_argument("--raw", default=os.path.join(ROOT, "data/raw/cc_messages.jsonl"))
-    ap.add_argument("--clean", default=os.path.join(ROOT, "data/clean/cc_messages.jsonl"))
-    ap.add_argument("--entities", default=os.path.join(ROOT, "data/entity_candidates.tsv"))
-    ap.add_argument("--stats", default=os.path.join(ROOT, "data/stats/cc_stats.json"))
-    ap.add_argument("--denylist", default=os.path.join(ROOT, "scrub/denylist.txt"))
-    ap.add_argument("--min-entity-count", type=int, default=2)
-    ap.add_argument("--drop-log", default=os.path.join(ROOT, "data/stats/cc_drops.jsonl"),
-                    help="jsonl with every authorship/language drop and strip and its reason")
+def add_arguments(ap):
+    ap.add_argument("--src", default=DEFAULT_SRC, help="Claude Code projects dir (default: %(default)s)")
+    ap.add_argument("--data-dir", default=os.environ.get("IRULAN_DATA_DIR") or DEFAULT_DATA_DIR,
+                    help="where raw/ and stats/ go (default: $IRULAN_DATA_DIR or ./data)")
+    ap.add_argument("--raw", help="raw extract path (default: DATA_DIR/raw/cc_messages.jsonl)")
+    ap.add_argument("--stats", help="stats path (default: DATA_DIR/stats/cc_stats.json)")
+    ap.add_argument("--drop-log", help="jsonl with every authorship/language drop and strip and its reason "
+                                       "(default: DATA_DIR/stats/cc_drops.jsonl)")
     ap.add_argument("--filter-config", help="JSON file overriding filters.AUTHOR_DEFAULTS thresholds")
     ap.add_argument("--no-author-filter", action="store_true",
                     help="keep pasted transcripts, profiles, LLM output and templates")
@@ -277,16 +231,20 @@ def main(argv=None):
     ap.add_argument("--par-threshold", type=int, help="paragraph paste score that strips it")
     ap.add_argument("--max-words", type=int, help="drop messages longer than this")
     ap.add_argument("--min-keep-words", type=int, help="prose words that must remain after a strip")
-    ap.add_argument("--rescrub", action="store_true",
-                    help="skip the transcript walk; re-read the raw extract and reapply scrubbing")
-    args = ap.parse_args(argv)
 
-    if args.rescrub:
-        if not os.path.exists(args.raw):
-            sys.exit("no raw extract at %s; run without --rescrub first" % args.raw)
-        rescrub(args)
-        return
 
+def resolve_paths(args):
+    d = args.data_dir
+    args.raw = args.raw or os.path.join(d, "raw", "cc_messages.jsonl")
+    args.stats = args.stats or os.path.join(d, "stats", "cc_stats.json")
+    args.drop_log = args.drop_log or os.path.join(d, "stats", "cc_drops.jsonl")
+    return args
+
+
+def run(args):
+    resolve_paths(args)
+    if not os.path.isdir(args.src):
+        sys.exit("no transcripts dir at %s (pass --src)" % args.src)
     cfg = load_filter_config(args.filter_config, {
         "par_threshold": args.par_threshold, "max_words": args.max_words,
         "min_keep_words": args.min_keep_words, "enabled": False if args.no_author_filter else None})
@@ -309,7 +267,17 @@ def main(argv=None):
     extract_stats["filter_config"] = cfg
     extract_stats["keep_non_english"] = args.keep_non_english
     extract_stats["raw"] = stats.summarise(raw)
-    rescrub(args, extract_stats)
+    out = {"extract": extract_stats, "raw_messages": len(raw)}
+    stats.write(out, args.stats)
+    print(stats.render(out))
+    print("wrote %s (not scrubbed), %s, %s" % (args.raw, args.stats, args.drop_log))
+    return out
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_arguments(ap)
+    return run(ap.parse_args(argv))
 
 
 if __name__ == "__main__":

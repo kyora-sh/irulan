@@ -1,9 +1,0 @@
-# Copy to scrub/denylist.txt (git-ignored) and replace these with real terms.
-# One term per line; matching is case-insensitive and whole-word.
-# Each match becomes <NAME>. A term followed by -<digits> (zorblax-3) becomes <HOST>.
-# Lines starting with # are ignored. Every entry below is invented.
-Acme Widgets
-zorblax
-Jane Fakename
-fakecorp
-quuxbank

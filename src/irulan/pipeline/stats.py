@@ -44,6 +44,12 @@ def render(stats):
         lines.append("dropped:")
         for k, v in sorted(ex.get("dropped", {}).items(), key=lambda kv: -kv[1]):
             lines.append("  %-22s %d" % (k, v))
+    rw = ex.get("raw", {})
+    if rw:
+        lines.append("raw: %d messages, %d words" % (rw["messages"], rw["words"]))
+        lines.append("  histogram: " + ", ".join("%s=%d" % kv for kv in rw["histogram"].items()))
+    # Stats files written before scrubbing moved to the platform also hold
+    # clean and scrub sections; still render them.
     cl = stats.get("clean", {})
     if cl:
         lines.append("clean: %d messages, %d words" % (cl["messages"], cl["words"]))
@@ -52,10 +58,3 @@ def render(stats):
     if sc:
         lines.append("scrub replacements: " + ", ".join("%s=%d" % kv for kv in sorted(sc.items())))
     return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    import sys
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/stats/cc_stats.json"
-    with open(path, encoding="utf-8") as f:
-        print(render(json.load(f)))

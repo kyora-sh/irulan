@@ -1,13 +1,9 @@
 """Authorship and language filter tests. Every fixture is invented."""
 
 import collections
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from irulan import extract_cc, filters  # noqa: E402
+from irulan.pipeline import extract_cc, filters
 
 TYPED = "kk sick\n\ncan u rq check the queue?\n\nfeels p slow rn, wdyt"
 

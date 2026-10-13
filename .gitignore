@@ -11,3 +11,6 @@ scrub/denylist.txt
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
+build/
+dist/
