@@ -189,8 +189,17 @@ model), `both` writes both, `assigned` takes the `variant` field from
 
 Runs use a small worker pool (`--workers`, default 4) with retries and
 exponential backoff, and are resumable: pairs already in the output file are
-skipped and new ones are appended as they finish. Every attempt is logged to
-`data/pairs/<run>.log.jsonl` with latency and token usage.
+skipped and new ones are appended as they finish (a half-written last line
+from a hard kill is dropped on resume). Every attempt is logged to
+`data/pairs/<run>.log.jsonl` with latency, token usage and error kind.
+
+Rate-limit errors (429, "rate limit", overloaded) get up to `--rate-retries`
+(6) attempts with a backoff starting at `--rate-backoff` (30 s), doubling up
+to 10 minutes. The run stops cleanly, starting no new calls and letting
+running ones finish, on a usage-limit error, after `--max-rate-failures` (3)
+jobs in a row gave up on rate limits, after `--max-consecutive-failures` (10)
+failed jobs in a row, or on SIGTERM/SIGINT. It then exits with code 3; rerun
+the same command to resume.
 
 `irulan/check_pairs.py` flags inputs that add or drop placeholders, are
 shorter than the target, exceed 4x its length, open with a preamble, look like

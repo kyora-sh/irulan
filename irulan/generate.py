@@ -21,6 +21,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -159,9 +160,27 @@ def clean_output(text):
 # Backends. call() returns {"text", "usage", "meta"} or raises BackendError.
 
 class BackendError(Exception):
-    def __init__(self, msg, retryable=True):
+    """`kind` is "rate_limit" (back off and retry), "usage_limit" (the account is
+    out of quota for hours: stop the run) or "" for anything else."""
+
+    def __init__(self, msg, retryable=True, kind=""):
         super().__init__(msg)
         self.retryable = retryable
+        self.kind = kind
+
+
+USAGE_LIMIT_RE = re.compile(r"(?i)usage limit|usage_limit|quota exceeded|quota_exceeded|usage not included|"
+                            r"hit your (?:usage )?limit|try again at\b")
+RATE_LIMIT_RE = re.compile(r"(?i)\b429\b|rate[ _-]?limit|too many requests|server overloaded|server_overloaded|"
+                           r"capacity unavailable|overloaded")
+
+
+def classify_error(msg):
+    if USAGE_LIMIT_RE.search(msg):
+        return "usage_limit"
+    if RATE_LIMIT_RE.search(msg):
+        return "rate_limit"
+    return ""
 
 
 class Backend:
@@ -253,8 +272,10 @@ class CodexBackend(Backend):
                 text = messages[-1]
             if not text.strip():
                 msg = "; ".join(errors) or (p.stderr.strip()[-300:] or "empty output (rc=%d)" % p.returncode)
-                retry = not re.search(r"not supported|invalid_request_error|status\":4(?!29)", msg)
-                raise BackendError(msg[:500], retryable=retry)
+                kind = classify_error(msg)
+                retry = kind == "rate_limit" or (
+                    kind == "" and not re.search(r"not supported|invalid_request_error|status\":4(?!29)", msg))
+                raise BackendError(msg[:500], retryable=retry, kind=kind)
             return {"text": text, "usage": usage, "meta": {"tool_items": tools} if tools else {}}
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -298,27 +319,70 @@ def plan_jobs(records, variants, seed, assigned=None):
     return jobs
 
 
+def repair_tail(path):
+    """Drop a half-written last line (left by a hard kill) so appends stay valid JSONL."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return 0
+    with open(path, "rb+") as f:
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return 0
+        f.seek(0)
+        data = f.read()
+        keep = data.rfind(b"\n") + 1
+        f.truncate(keep)
+        return len(data) - keep
+
+
 def done_keys(path):
     keys = set()
     if os.path.exists(path):
-        for r in read_jsonl(path):
-            keys.add((r["id"], r["backend"], r["model"], r["variant"]))
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                keys.add((r["id"], r["backend"], r["model"], r["variant"]))
     return keys
 
 
 class Runner:
+    """Worker pool with retries. Rate limits get a long backoff; a usage limit,
+    `max_rate_failures` jobs in a row given up on rate limits, or
+    `max_consecutive_failures` failed jobs in a row stop the run cleanly: no
+    new calls start, finished pairs are on disk, and rerunning resumes."""
+
     def __init__(self, backend, out_path, log_path, retries=3, backoff=2.0, quiet=False,
-                 prompt_version=DEFAULT_PROMPT_VERSION):
+                 prompt_version=DEFAULT_PROMPT_VERSION, rate_retries=6, rate_backoff=30.0,
+                 rate_backoff_max=600.0, max_rate_failures=3, max_consecutive_failures=10):
         self.backend = backend
         self.prompt_version = prompt_version
         self.out_path = out_path
         self.log_path = log_path
         self.retries = retries
         self.backoff = backoff
+        self.rate_retries = rate_retries
+        self.rate_backoff = rate_backoff
+        self.rate_backoff_max = rate_backoff_max
+        self.max_rate_failures = max_rate_failures
+        self.max_consecutive_failures = max_consecutive_failures
         self.quiet = quiet
         self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.stop_reason = ""
         self.ok = 0
         self.failed = 0
+        self.skipped = 0
+        self.rate_failures_in_row = 0
+        self.failures_in_row = 0
+
+    def request_stop(self, reason):
+        with self.lock:
+            if not self.stop.is_set():
+                self.stop_reason = reason
+                self.stop.set()
+                print("stopping: %s" % reason, file=sys.stderr)
 
     def log(self, entry):
         entry["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -326,9 +390,31 @@ class Runner:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _gave_up(self, rec, variant, e):
+        with self.lock:
+            self.failed += 1
+            self.failures_in_row += 1
+            if e.kind == "rate_limit":
+                self.rate_failures_in_row += 1
+            n_rate, n_any = self.rate_failures_in_row, self.failures_in_row
+        if not self.quiet:
+            print("FAIL %s %s: %s" % (rec["id"], variant, e), file=sys.stderr)
+        if e.kind == "usage_limit":
+            self.request_stop("usage limit: %s" % str(e)[:200])
+        elif n_rate >= self.max_rate_failures:
+            self.request_stop("%d jobs in a row failed on rate limits" % n_rate)
+        elif n_any >= self.max_consecutive_failures:
+            self.request_stop("%d jobs in a row failed (last: %s)" % (n_any, str(e)[:200]))
+
     def one(self, rec, variant):
+        if self.stop.is_set():
+            with self.lock:
+                self.skipped += 1
+            return None
         prompt = build_prompt(rec["text"], variant, self.prompt_version)
-        for attempt in range(1, self.retries + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             t0 = time.time()
             try:
                 res = self.backend.call(prompt)
@@ -336,14 +422,24 @@ class Runner:
                 dt = time.time() - t0
                 self.log({"id": rec["id"], "variant": variant, "backend": self.backend.name,
                           "model": self.backend.model, "attempt": attempt, "ok": False,
-                          "latency_s": round(dt, 2), "error": str(e)})
-                if not e.retryable or attempt == self.retries:
-                    with self.lock:
-                        self.failed += 1
-                    if not self.quiet:
-                        print("FAIL %s %s: %s" % (rec["id"], variant, e), file=sys.stderr)
+                          "latency_s": round(dt, 2), "error": str(e), "kind": e.kind})
+                rate = e.kind == "rate_limit"
+                limit = self.rate_retries if rate else self.retries
+                if not e.retryable or attempt >= limit:
+                    self._gave_up(rec, variant, e)
                     return None
-                time.sleep(self.backoff * (2 ** (attempt - 1)) + random.random())
+                if self.stop.is_set():
+                    with self.lock:
+                        self.skipped += 1
+                    return None
+                if rate:
+                    delay = min(self.rate_backoff_max, self.rate_backoff * (2 ** (attempt - 1)))
+                else:
+                    delay = self.backoff * (2 ** (attempt - 1))
+                if self.stop.wait(delay + (random.random() if delay else 0)):
+                    with self.lock:
+                        self.skipped += 1
+                    return None
                 continue
             dt = time.time() - t0
             text = clean_output(res["text"])
@@ -373,6 +469,8 @@ class Runner:
                 with open(self.out_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(out, ensure_ascii=False) + "\n")
                 self.ok += 1
+                self.failures_in_row = 0
+                self.rate_failures_in_row = 0
                 if not self.quiet:
                     u = out["meta"]["usage"]
                     print("ok   %s %-9s %5.1fs in=%s out=%s" % (
@@ -383,8 +481,15 @@ class Runner:
     def run(self, jobs, workers):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             futs = [ex.submit(self.one, r, v) for r, v in jobs]
-            for f in concurrent.futures.as_completed(futs):
-                f.result()
+            try:
+                for f in concurrent.futures.as_completed(futs):
+                    f.result()
+                    if self.stop.is_set():
+                        break
+            finally:
+                # Queued jobs are dropped; calls already running finish and are saved.
+                ex.shutdown(wait=True, cancel_futures=True)
+        self.skipped += sum(1 for f in futs if f.cancelled())
 
 
 def main(argv=None):
@@ -401,6 +506,12 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--rate-retries", type=int, default=6, help="attempts per job on rate-limit errors")
+    ap.add_argument("--rate-backoff", type=float, default=30.0, help="first rate-limit backoff in s, doubled per retry")
+    ap.add_argument("--max-rate-failures", type=int, default=3,
+                    help="stop after this many jobs in a row gave up on rate limits")
+    ap.add_argument("--max-consecutive-failures", type=int, default=10,
+                    help="stop after this many failed jobs in a row")
     ap.add_argument("--effort", default="low", help="codex reasoning effort: low|medium|high ('' to leave unset)")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--tmp-root", default=os.environ.get("IRULAN_TMP"),
@@ -435,16 +546,32 @@ def main(argv=None):
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, args.run + ".jsonl")
     log_path = os.path.join(args.out_dir, args.run + ".log.jsonl")
+    dropped = repair_tail(out_path)
+    if dropped:
+        print("dropped a half-written last line (%d bytes) from %s" % (dropped, out_path), file=sys.stderr)
     done = done_keys(out_path)
     jobs = [(r, v) for r, v in plan_jobs(records, args.variants, args.seed, assigned)
             if (r["id"], backend.name, backend.model, v) not in done]
     print("%s (%s): %d jobs, %d already done -> %s" % (
         backend.name, backend.model, len(jobs), len(done), out_path), file=sys.stderr)
-    runner = Runner(backend, out_path, log_path, retries=args.retries, prompt_version=args.prompt_version)
+    runner = Runner(backend, out_path, log_path, retries=args.retries, prompt_version=args.prompt_version,
+                    rate_retries=args.rate_retries, rate_backoff=args.rate_backoff,
+                    max_rate_failures=args.max_rate_failures,
+                    max_consecutive_failures=args.max_consecutive_failures)
+
+    def on_signal(signum, _frame):
+        runner.request_stop("signal %d" % signum)
+
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, on_signal)
     t0 = time.time()
     runner.run(jobs, args.workers)
-    print("%s (%s): %d ok, %d failed in %.0fs" % (
-        backend.name, backend.model, runner.ok, runner.failed, time.time() - t0))
+    print("%s (%s): %d ok, %d failed, %d not started in %.0fs" % (
+        backend.name, backend.model, runner.ok, runner.failed, runner.skipped, time.time() - t0))
+    if runner.stop.is_set():
+        print("stopped early (%s); rerun the same command to resume" % runner.stop_reason)
+        return 3
     return 0
 
 

@@ -68,6 +68,94 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(len(f.readlines()), 4)
 
 
+class ScriptedBackend(generate.Backend):
+    """Raises the scripted errors in order, then succeeds."""
+    name = "fake"
+
+    def __init__(self, errors):
+        super().__init__("fake-1")
+        self.errors = list(errors)
+        self.calls = 0
+
+    def call(self, prompt):
+        self.calls += 1
+        if self.errors:
+            e = self.errors.pop(0)
+            if e is not None:
+                raise e
+        return {"text": "Could you please check the zorblax build?", "usage": {}, "meta": {}}
+
+
+def rate_err():
+    return generate.BackendError("stream error: 429 Too Many Requests",
+                                 kind=generate.classify_error("429 Too Many Requests"))
+
+
+class StopTests(unittest.TestCase):
+    def runner(self, d, backend, **kw):
+        kw.setdefault("rate_backoff", 0.0)
+        kw.setdefault("backoff", 0.0)
+        return generate.Runner(backend, os.path.join(d, "o.jsonl"), os.path.join(d, "o.log.jsonl"),
+                               quiet=True, **kw)
+
+    def jobs(self, n):
+        return [({"id": "m%d" % i, "text": "pls check the zorblax build"}, "plain") for i in range(n)]
+
+    def test_classify(self):
+        self.assertEqual(generate.classify_error("You've hit your usage limit. Try again at 3:04 PM."), "usage_limit")
+        self.assertEqual(generate.classify_error("unexpected status 429 Too Many Requests"), "rate_limit")
+        self.assertEqual(generate.classify_error("Rate limit reached for requests"), "rate_limit")
+        self.assertEqual(generate.classify_error("stream disconnected before completion"), "")
+
+    def test_rate_limit_retries_past_the_normal_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = ScriptedBackend([rate_err(), rate_err(), rate_err(), rate_err()])
+            r = self.runner(d, b, retries=2, rate_retries=6)
+            r.run(self.jobs(1), 1)
+            self.assertEqual((r.ok, r.failed, b.calls), (1, 0, 5))
+            self.assertFalse(r.stop.is_set())
+
+    def test_usage_limit_stops_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = ScriptedBackend([generate.BackendError("You've hit your usage limit.", retryable=False,
+                                                       kind="usage_limit")])
+            r = self.runner(d, b)
+            r.run(self.jobs(20), 1)
+            self.assertTrue(r.stop.is_set())
+            self.assertEqual((r.ok, r.failed, r.skipped, b.calls), (0, 1, 19, 1))
+
+    def test_persistent_rate_limits_stop_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = ScriptedBackend([rate_err() for _ in range(100)])
+            r = self.runner(d, b, rate_retries=2, max_rate_failures=3)
+            r.run(self.jobs(20), 1)
+            self.assertTrue(r.stop.is_set())
+            self.assertEqual((r.ok, r.failed, r.skipped, b.calls), (0, 3, 17, 6))
+
+    def test_other_failures_in_a_row_stop_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = ScriptedBackend([generate.BackendError("boom", retryable=False) for _ in range(100)])
+            r = self.runner(d, b, max_consecutive_failures=4)
+            r.run(self.jobs(10), 1)
+            self.assertEqual((r.failed, r.skipped), (4, 6))
+
+    def test_resume_drops_a_half_written_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "in.jsonl")
+            with open(src, "w") as f:
+                for i in range(3):
+                    f.write(json.dumps({"id": "m%d" % i, "text": "pls check build %d" % i}) + "\n")
+            args = ["--backend", "fake", "--run", "t", "--input", src, "--out-dir", d, "--variants", "plain"]
+            out = os.path.join(d, "t.jsonl")
+            generate.main(args + ["--limit", "2"])
+            with open(out, "a") as f:
+                f.write('{"id": "m2", "backend": "fa')
+            self.assertEqual(generate.main(args), 0)
+            with open(out) as f:
+                rows = [json.loads(line) for line in f]
+            self.assertEqual(sorted(r["id"] for r in rows), ["m0", "m1", "m2"])
+
+
 class CheckTests(unittest.TestCase):
     def test_placeholders(self):
         self.assertIn("placeholder_dropped", check_pairs.check(pair("Please look at it, thanks a lot.", "look at <URL> pls")))
