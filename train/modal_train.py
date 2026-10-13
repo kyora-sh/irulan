@@ -486,21 +486,21 @@ def _load_model(cfg, for_training):
 
 
 def _report_fast_path(model):
-    """Print whether the DeltaNet layers got the fla / causal-conv1d kernels."""
+    """Print which implementation each DeltaNet kernel resolved to: transformers
+    wraps the torch reference and swaps in fla / causal_conv1d when present."""
     import importlib
     mod = importlib.import_module(type(model).__module__)
-    flags = {n: getattr(mod, n) for n in dir(mod)
-             if any(k in n.lower() for k in ("fast_path", "causal_conv1d", "gated_delta", "fla_"))}
-    shown = {n: (v if isinstance(v, (bool, type(None))) else ("available" if v else v))
-             for n, v in flags.items() if not isinstance(v, type(mod))}
-    print("kernels: %s" % json.dumps({k: str(v) if not isinstance(v, (bool, type(None))) else v
-                                      for k, v in shown.items()}))
-    for name, m in model.named_modules():
-        if name.endswith("linear_attn"):
-            print("linear_attn impl: %s" % json.dumps({
-                k: getattr(getattr(m, k, None), "__module__", None)
-                for k in ("causal_conv1d_fn", "chunk_gated_delta_rule", "recurrent_gated_delta_rule")}))
-            break
+    found = {}
+    for name in ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule",
+                 "causal_conv1d_fn", "causal_conv1d_update"):
+        f, impl = getattr(mod, name, None), None
+        while f is not None and impl is None:
+            cells = dict(zip(getattr(getattr(f, "__code__", None), "co_freevars", ()),
+                             (c.cell_contents for c in (getattr(f, "__closure__", None) or ()))))
+            impl = cells.get("implementation")
+            f = getattr(f, "__wrapped__", None)
+        found[name] = getattr(impl, "__module__", None) if impl is not None else "unknown"
+    print("kernels: %s" % json.dumps(found))
 
 
 def _check_template(tok, rec):
