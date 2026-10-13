@@ -1,0 +1,9 @@
+# Extracted data never goes into git: this repo is public.
+data/
+*.local.*
+scrub/denylist.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
