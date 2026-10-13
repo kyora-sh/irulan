@@ -17,7 +17,8 @@ template with enable_thinking=False, and stop on <|im_end|>. Request texts
 are never logged.
 
 Adapters are read from the `irulan-runs` volume: `<run>` is
-`<run>/adapter`, `<run>@checkpoint-N` is `<run>/checkpoints/checkpoint-N`.
+`<run>/adapter`, `<run>@epoch-N` is `<run>/epoch-N` and `<run>@checkpoint-N`
+is `<run>/checkpoints/checkpoint-N`.
 The default is the first of DEFAULT_ADAPTERS that exists (override with
 PLAYGROUND_DEFAULT_ADAPTER at serve time).
 
@@ -84,7 +85,7 @@ def token_ok(given, expected):
 
 
 _RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-_ADAPTER_RE = re.compile(r"^(?P<run>[A-Za-z0-9][A-Za-z0-9._-]{0,99})(?:@checkpoint-(?P<step>\d{1,9}))?$")
+_ADAPTER_RE = re.compile(r"^(?P<run>[A-Za-z0-9][A-Za-z0-9._-]{0,99})(?:@(?P<kind>checkpoint|epoch)-(?P<step>\d{1,9}))?$")
 
 
 def adapter_path(root, name):
@@ -92,7 +93,9 @@ def adapter_path(root, name):
     m = _ADAPTER_RE.match(name or "")
     if not m or m.group("run") in (".", ".."):
         return None
-    if m.group("step"):
+    if m.group("kind") == "epoch":
+        return os.path.join(root, m.group("run"), "epoch-%d" % int(m.group("step")))
+    if m.group("kind") == "checkpoint":
         return os.path.join(root, m.group("run"), "checkpoints", "checkpoint-%d" % int(m.group("step")))
     return os.path.join(root, m.group("run"), "adapter")
 
@@ -108,7 +111,8 @@ def _same_base(adapter_dir):
 
 
 def list_adapters(root):
-    """[{name, run, step}] for every run adapter and checkpoint of BASE_MODEL that has weights."""
+    """[{name, run, step}] for every run adapter, per-epoch adapter and checkpoint
+    of BASE_MODEL that has weights."""
     out = []
     try:
         runs = sorted(os.listdir(root))
@@ -121,6 +125,13 @@ def list_adapters(root):
             continue
         if os.path.exists(os.path.join(root, run, "adapter", "adapter_model.safetensors")):
             out.append({"name": run, "run": run, "step": None})
+        epochs = []
+        for d in os.listdir(os.path.join(root, run)) if os.path.isdir(os.path.join(root, run)) else ():
+            m = re.match(r"^epoch-(\d+)$", d)
+            if m and os.path.exists(os.path.join(root, run, d, "adapter_model.safetensors")):
+                epochs.append(int(m.group(1)))
+        for e in sorted(epochs):
+            out.append({"name": "%s@epoch-%d" % (run, e), "run": run, "step": None, "epoch": e})
         ck = os.path.join(root, run, "checkpoints")
         steps = []
         if os.path.isdir(ck):

@@ -368,7 +368,8 @@ MODAL_PROFILE=<profile> modal serve serve/modal_playground.py --env testing
   adapters as runtime LoRA, one H100, at most one container, scaled to zero
   after 5 idle minutes. Inference uses `system_v1`, the chat template with
   `enable_thinking=False`, top-p 0.8, top-k 20, temperature 0.3 by default.
-- Adapters come from the `irulan-runs` volume: `<run>` (the best adapter) and
+- Adapters come from the `irulan-runs` volume: `<run>` (the best adapter),
+  `<run>@epoch-N` (each epoch's adapter) and
   `<run>@checkpoint-N`. Adapters of another base model are not listed. peft
   saves the text-only names (`model.layers.N`); the engine renames them to
   the checkpoint's `model.language_model.layers.N` before loading, since vLLM

@@ -50,7 +50,8 @@ class AdapterTest(unittest.TestCase):
     def test_paths(self):
         self.assertEqual(pg.adapter_path("/r", "run-a"), "/r/run-a/adapter")
         self.assertEqual(pg.adapter_path("/r", "run-a@checkpoint-20"), "/r/run-a/checkpoints/checkpoint-20")
-        for bad in ("", "..", "../x", "a/b", "run@checkpoint-x", "@checkpoint-1", ".hidden"):
+        self.assertEqual(pg.adapter_path("/r", "run-a@epoch-1"), "/r/run-a/epoch-1")
+        for bad in ("", "..", "../x", "a/b", "run@checkpoint-x", "@checkpoint-1", ".hidden", "run@step-1"):
             self.assertIsNone(pg.adapter_path("/r", bad), bad)
 
     def test_list_and_default(self):
@@ -63,12 +64,15 @@ class AdapterTest(unittest.TestCase):
             touch("smoke-1", "checkpoints", "checkpoint-20", "adapter_model.safetensors")
             touch("smoke-1", "checkpoints", "checkpoint-10", "adapter_model.safetensors")
             touch("smoke-1", "checkpoints", "checkpoint-30", "optimizer.pt")  # no weights
+            touch("smoke-1", "epoch-2", "adapter_model.safetensors")
+            touch("smoke-1", "epoch-1", "adapter_model.safetensors")
             touch("empty-run", "config.json")
             touch("check-small", "adapter", "adapter_model.safetensors")
             with open(os.path.join(d, "check-small", "adapter", "adapter_config.json"), "w") as f:
                 f.write('{"base_model_name_or_path": "Qwen/Qwen3.5-0.8B"}')
             names = [a["name"] for a in pg.list_adapters(d)]
-            self.assertEqual(names, ["smoke-1", "smoke-1@checkpoint-10", "smoke-1@checkpoint-20"])
+            self.assertEqual(names, ["smoke-1", "smoke-1@epoch-1", "smoke-1@epoch-2",
+                                     "smoke-1@checkpoint-10", "smoke-1@checkpoint-20"])
             self.assertEqual(pg.default_adapter(names), "smoke-1")
             touch("qlora-r32-v1", "adapter", "adapter_model.safetensors")
             names = [a["name"] for a in pg.list_adapters(d)]
