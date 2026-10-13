@@ -2,18 +2,25 @@
 
 Nothing here spends money unless it is told to twice: the dry run is local
 and needs no Modal or torch, and every GPU job needs --confirm-spend on top
-of an explicitly selected, non-Atira Modal profile.
+of an explicitly selected Modal profile. A profile on the Atira workspace is
+refused unless --allow-atira-workspace is passed, and then only in a
+non-production environment (--modal-env) where no app named irulan-train
+is running or deployed. Every GPU function has a hard timeout (train 90 min,
+smoke 25 min, eval 30 min) and the launcher prints the estimate and the
+timeout's dollar ceiling before starting. Jobs run as ephemeral apps
+(`app.run()`, like `modal run`); nothing here ever deploys.
 
     # local, free: validate data/train and print the cost estimate
     python3 -I train/modal_train.py train --dry-run [--scale-to 10100]
 
     # real runs need the modal client (the CLI's own venv, or uv):
     uv run --no-project --with modal==1.4.3 python -I train/modal_train.py \\
-        upload --profile <personal-profile>
+        upload --profile <profile>
     uv run --no-project --with modal==1.4.3 python -I train/modal_train.py \\
-        train --profile <personal-profile> --confirm-spend [--gpu H100] [--run NAME]
+        train --profile <profile> --confirm-spend [--gpu H100] [--run NAME] [--max-steps N]
     uv run --no-project --with modal==1.4.3 python -I train/modal_train.py \\
-        eval --profile <personal-profile> --confirm-spend --run NAME [--limit 200]
+        eval --profile <profile> --confirm-spend --run NAME [--limit 200]
+    # on the Atira workspace, add: --allow-atira-workspace --modal-env testing
 
 `modal run` / `modal deploy` on this file are refused on purpose: the
 launcher checks the profile before the Modal client is even imported.
@@ -52,7 +59,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BASE_MODEL = "Qwen/Qwen3.8-27B"
 BASE_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-APP_NAME = "irulan-swe-train"
+APP_NAME = "irulan-train"
 DATA_VOLUME = "irulan-data"
 HF_VOLUME = "irulan-hf-cache"
 RUNS_VOLUME = "irulan-runs"
@@ -94,12 +101,22 @@ GPUS = {
     "H100": {"usd_per_hour": 3.95, "tokens_per_s": 1000},
     "A100-80GB": {"usd_per_hour": 2.50, "tokens_per_s": 450},
     "B200": {"usd_per_hour": 6.25, "tokens_per_s": 1800},
+    # only for a pipeline check with a small --base-model; far too small for the 27B
+    "L4": {"usd_per_hour": 0.80, "tokens_per_s": 3000},
 }
+# Hard Modal timeouts for the GPU functions, in minutes.
+TRAIN_TIMEOUT_MIN = 90
+SMOKE_TIMEOUT_MIN = 25
+EVAL_TIMEOUT_MIN = 30
+SMOKE_MAX_STEPS = 50  # --smoke refuses a longer run
 SETUP_MINUTES = 12   # GPU minutes for loading + quantising the weights and kernel warm-up
 EVAL_COST_FACTOR = 1 / 3  # an eval token costs about a third of a training token (forward only)
 
-# The profile guard: a profile whose name or workspace matches this is refused.
+# The profile guard: a profile whose name or workspace matches this is refused
+# unless --allow-atira-workspace is passed; then only these environments may
+# be used (never prod), and APP_NAME must not collide with an existing app.
 BLOCKED_WORKSPACE_RE = re.compile(os.environ.get("IRULAN_BLOCKED_MODAL_RE", r"atira"), re.I)
+ATIRA_ALLOWED_ENVS = ("testing", "dev")
 
 
 class Refused(SystemExit):
@@ -140,11 +157,13 @@ def lookup_workspaces():
         return None
 
 
-def check_profile(profile, env=None, profiles=None, workspaces=None, skip_workspace_check=False):
+def check_profile(profile, env=None, profiles=None, workspaces=None, skip_workspace_check=False,
+                  allow_atira=False):
     """Return the profile to use, or raise Refused. The profile must be named
-    explicitly (--profile or MODAL_PROFILE), exist, and neither its name nor
-    its workspace may look like Atira's. Token env vars are refused because
-    they override the profile and hide which workspace is used."""
+    explicitly (--profile or MODAL_PROFILE) and exist; unless allow_atira is
+    set, neither its name nor its workspace may look like Atira's. Token env
+    vars are refused because they override the profile and hide which
+    workspace is used."""
     env = os.environ if env is None else env
     if env.get("MODAL_TOKEN_ID") or env.get("MODAL_TOKEN_SECRET"):
         raise Refused("MODAL_TOKEN_ID/MODAL_TOKEN_SECRET are set; they override the profile. Unset them.")
@@ -152,8 +171,9 @@ def check_profile(profile, env=None, profiles=None, workspaces=None, skip_worksp
     if not profile:
         raise Refused("no Modal profile selected. Pass --profile NAME or set MODAL_PROFILE "
                       "to a personal (non-Atira) profile; the active profile is never used implicitly.")
-    if BLOCKED_WORKSPACE_RE.search(profile):
-        raise Refused("profile %r looks like an Atira profile; this project must not run there." % profile)
+    if BLOCKED_WORKSPACE_RE.search(profile) and not allow_atira:
+        raise Refused("profile %r looks like an Atira profile; pass --allow-atira-workspace only "
+                      "if running there was approved." % profile)
     profiles = modal_profiles() if profiles is None else profiles
     if profile not in profiles:
         raise Refused("profile %r is not in ~/.modal.toml (found: %s)." % (profile, ", ".join(profiles) or "none"))
@@ -163,19 +183,61 @@ def check_profile(profile, env=None, profiles=None, workspaces=None, skip_worksp
             raise Refused("could not confirm the workspace of profile %r (pass "
                           "--skip-workspace-check only if you know it)." % profile)
         ws = workspaces[profile] or ""
-        if BLOCKED_WORKSPACE_RE.search(ws):
-            raise Refused("profile %r points at workspace %r, which looks like Atira's." % (profile, ws))
+        if BLOCKED_WORKSPACE_RE.search(ws) and not allow_atira:
+            raise Refused("profile %r points at workspace %r, which looks like Atira's; pass "
+                          "--allow-atira-workspace only if running there was approved." % (profile, ws))
     return profile
 
 
+def is_atira(profile, workspace=None):
+    return bool(BLOCKED_WORKSPACE_RE.search(profile or "") or BLOCKED_WORKSPACE_RE.search(workspace or ""))
+
+
+def check_atira_env(modal_env):
+    """On the Atira workspace the environment must be named and allowlisted."""
+    if not modal_env:
+        raise Refused("on the Atira workspace pass --modal-env (one of %s); the profile's "
+                      "default environment is never used there." % ", ".join(ATIRA_ALLOWED_ENVS))
+    if modal_env not in ATIRA_ALLOWED_ENVS:
+        raise Refused("environment %r is not allowed on the Atira workspace (allowed: %s)." % (
+            modal_env, ", ".join(ATIRA_ALLOWED_ENVS)))
+    return modal_env
+
+
+def list_apps(modal_env):
+    """[{name, state, id}] via `modal app list --json` (read-only), or None."""
+    cmd = ["modal", "app", "list", "--json"] + (["--env", modal_env] if modal_env else [])
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=True,
+                             env=dict(os.environ, NO_COLOR="1")).stdout
+        return [{"name": a.get("Description"), "state": a.get("State"), "id": a.get("App ID")}
+                for a in json.loads(out)]
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def check_app_collision(apps, app_name=None):
+    """Refuse if an app with our name is deployed or running (stopped is fine)."""
+    app_name = app_name or APP_NAME
+    if apps is None:
+        raise Refused("could not list the apps in the environment; not starting %s." % app_name)
+    live = [a for a in apps if a.get("name") == app_name and "stopped" not in (a.get("state") or "")]
+    if live:
+        raise Refused("an app named %r already exists (%s); not starting another one." % (
+            app_name, ", ".join("%s %s" % (a.get("id"), a.get("state")) for a in live)))
+    return True
+
+
 def _early_profile_from_argv(argv):
-    """Export --profile as MODAL_PROFILE before modal is imported (the client
-    reads it once, at import time)."""
-    for i, a in enumerate(argv):
-        if a == "--profile" and i + 1 < len(argv):
-            os.environ["MODAL_PROFILE"] = argv[i + 1]
-        elif a.startswith("--profile="):
-            os.environ["MODAL_PROFILE"] = a.split("=", 1)[1]
+    """Export --profile as MODAL_PROFILE (and --modal-env as
+    MODAL_ENVIRONMENT) before modal is imported (the client reads the
+    profile once, at import time)."""
+    for flag, var in (("--profile", "MODAL_PROFILE"), ("--modal-env", "MODAL_ENVIRONMENT")):
+        for i, a in enumerate(argv):
+            if a == flag and i + 1 < len(argv):
+                os.environ[var] = argv[i + 1]
+            elif a.startswith(flag + "="):
+                os.environ[var] = a.split("=", 1)[1]
 
 
 if __name__ == "__main__":
@@ -263,8 +325,10 @@ def length_grouped_batches(lengths, micro_batch, rng, mega=64):
 
 
 def estimate(stats, gpu="H100", epochs=2, effective_batch=32, micro_batch=8, eval_every=0,
-             scale=1.0, tokens_per_s=None):
-    """Steps, time and dollars from the per-split token counts."""
+             scale=1.0, tokens_per_s=None, max_steps=0, val_limit=0):
+    """Steps, time and dollars from the per-split token counts. max_steps > 0
+    stops the run early (the estimate scales the trained tokens down);
+    val_limit > 0 evaluates on that many val examples only."""
     g = GPUS[gpu]
     tps = tokens_per_s or g["tokens_per_s"]
     n_train = stats["train"]["n"] * scale
@@ -273,15 +337,20 @@ def estimate(stats, gpu="H100", epochs=2, effective_batch=32, micro_batch=8, eva
     grad_accum = max(1, round(effective_batch / micro_batch))
     steps_per_epoch = math.ceil(n_train / (micro_batch * grad_accum))
     total_steps = steps_per_epoch * epochs
+    full_steps = total_steps
+    if max_steps and max_steps < total_steps:
+        total_steps = max_steps
     eval_steps = eval_every or default_eval_steps(total_steps)
     n_evals = total_steps // eval_steps + 1
-    work_tokens = train_tokens * epochs + val_tokens * n_evals * EVAL_COST_FACTOR
+    if val_limit and stats["val"]["n"]:
+        val_tokens *= min(1.0, val_limit / (stats["val"]["n"] * scale))
+    work_tokens = train_tokens * epochs * total_steps / full_steps + val_tokens * n_evals * EVAL_COST_FACTOR
     hours = work_tokens / tps / 3600 + SETUP_MINUTES / 60
     return {
         "gpu": gpu, "assumed_tokens_per_s": tps, "usd_per_hour": g["usd_per_hour"],
         "train_examples": int(n_train), "epochs": epochs, "micro_batch": micro_batch,
         "grad_accum": grad_accum, "effective_batch": micro_batch * grad_accum,
-        "steps_per_epoch": steps_per_epoch, "total_steps": total_steps,
+        "steps_per_epoch": steps_per_epoch, "total_steps": total_steps, "max_steps": max_steps,
         "eval_steps": eval_steps, "evals": n_evals,
         "train_tokens_per_epoch_padded": int(train_tokens), "work_tokens": int(work_tokens),
         "hours": round(hours, 2), "usd": round(hours * g["usd_per_hour"], 2),
@@ -331,8 +400,10 @@ def print_estimate(est, scale_note=""):
     print("cost estimate%s:" % scale_note)
     print("  %d train examples x %d epochs, micro-batch %d x grad-accum %d = effective batch %d" % (
         est["train_examples"], est["epochs"], est["micro_batch"], est["grad_accum"], est["effective_batch"]))
-    print("  %d steps (%d per epoch), eval every %d steps (%d evals)" % (
-        est["total_steps"], est["steps_per_epoch"], est["eval_steps"], est["evals"]))
+    print("  %d steps (%d per epoch%s), eval every %d steps (%d evals)" % (
+        est["total_steps"], est["steps_per_epoch"],
+        ", stopped by --max-steps" if est.get("max_steps") and est["max_steps"] == est["total_steps"] else "",
+        est["eval_steps"], est["evals"]))
     print("  ~%.2fM padded train tokens per epoch, ~%.2fM token-equivalents of work" % (
         est["train_tokens_per_epoch_padded"] / 1e6, est["work_tokens"] / 1e6))
     print("  assumption: %d tokens/s on one %s (QLoRA 27B, NF4, grad checkpointing), plus %d min setup" % (
@@ -380,7 +451,13 @@ def _load_model(cfg, for_training):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    tok = AutoTokenizer.from_pretrained(BASE_MODEL, revision=BASE_REVISION)
+    import time
+    from importlib.metadata import version
+    print("env: %s, %s" % (torch.cuda.get_device_name(0), ", ".join(
+        "%s %s" % (p, version(p)) for p in ("torch", "transformers", "peft", "bitsandbytes", "fla-core"))))
+    t0 = time.time()
+    base, rev = cfg.get("base_model") or BASE_MODEL, cfg.get("base_revision") or BASE_REVISION
+    tok = AutoTokenizer.from_pretrained(base, revision=rev)
     if tok.pad_token_id is None:
         tok.pad_token = "<|endoftext|>"
     bnb = BitsAndBytesConfig(
@@ -388,10 +465,15 @@ def _load_model(cfg, for_training):
         bnb_4bit_use_double_quant=True, bnb_4bit_quant_storage=torch.bfloat16,
         llm_int8_skip_modules=list(BNB_SKIP_MODULES))
     model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL, revision=BASE_REVISION, quantization_config=bnb, dtype=torch.bfloat16,
+        base, revision=rev, quantization_config=bnb, dtype=torch.bfloat16,
         attn_implementation="sdpa", device_map={"": 0})
-    print("loaded %s (%s), %.1f GB on GPU" % (type(model).__name__, BASE_REVISION[:8],
-                                              torch.cuda.memory_allocated() / 1e9))
+    cfg["_load_s"] = round(time.time() - t0, 1)
+    print("loaded %s %s (%s) in %.0f s, %.1f GB on GPU" % (base, type(model).__name__, rev[:8],
+                                                       cfg["_load_s"], torch.cuda.memory_allocated() / 1e9))
+    try:
+        _report_fast_path(model)
+    except Exception as e:  # diagnostics only
+        print("kernels: could not inspect (%s)" % e)
     if any(".visual." in n or n.startswith("visual.") for n, _ in model.named_modules()):
         print("note: vision tower present; it is frozen and not targeted by LoRA")
     if for_training:
@@ -401,6 +483,24 @@ def _load_model(cfg, for_training):
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
     return model, tok
+
+
+def _report_fast_path(model):
+    """Print whether the DeltaNet layers got the fla / causal-conv1d kernels."""
+    import importlib
+    mod = importlib.import_module(type(model).__module__)
+    flags = {n: getattr(mod, n) for n in dir(mod)
+             if any(k in n.lower() for k in ("fast_path", "causal_conv1d", "gated_delta", "fla_"))}
+    shown = {n: (v if isinstance(v, (bool, type(None))) else ("available" if v else v))
+             for n, v in flags.items() if not isinstance(v, type(mod))}
+    print("kernels: %s" % json.dumps({k: str(v) if not isinstance(v, (bool, type(None))) else v
+                                      for k, v in shown.items()}))
+    for name, m in model.named_modules():
+        if name.endswith("linear_attn"):
+            print("linear_attn impl: %s" % json.dumps({
+                k: getattr(getattr(m, k, None), "__module__", None)
+                for k in ("causal_conv1d_fn", "chunk_gated_delta_rule", "recurrent_gated_delta_rule")}))
+            break
 
 
 def _check_template(tok, rec):
@@ -428,7 +528,8 @@ def run_training(cfg):
     model, tok = _load_model(cfg, for_training=True)
     data = {}
     for split in ("train", "val"):
-        rows = _read_jsonl(os.path.join(DATA_MOUNT, cfg["data_subdir"], "%s.jsonl" % split))
+        rows = _read_jsonl(os.path.join(DATA_MOUNT, cfg["data_subdir"], "%s.jsonl" % split),
+                           cfg.get("val_limit", 0) if split == "val" else 0)
         if split == "train" and rows:
             _check_template(tok, rows[0])
         enc = [_encode(tok, r, cfg["max_seq_len"]) for r in rows]
@@ -455,10 +556,15 @@ def run_training(cfg):
     micro, accum = cfg["micro_batch"], max(1, round(cfg["effective_batch"] / cfg["micro_batch"]))
     steps_per_epoch = math.ceil(len(data["train"]) / (micro * accum))
     total_steps = steps_per_epoch * cfg["epochs"]
+    if cfg.get("max_steps") and cfg["max_steps"] < total_steps:
+        total_steps = cfg["max_steps"]
     eval_steps = cfg["eval_steps"] or default_eval_steps(total_steps)
-    print("steps: %d (%d per epoch), eval/save every %d" % (total_steps, steps_per_epoch, eval_steps))
+    print("steps: %d (%d per epoch%s), eval/save every %d" % (
+        total_steps, steps_per_epoch, ", --max-steps" if cfg.get("max_steps") else "", eval_steps))
 
     runs_vol = volumes[RUNS_MOUNT]
+    import time
+    meter = {"real": 0, "padded": 0, "steps": []}
 
     class CommitVolume(TrainerCallback):
         def on_save(self, args, state, control, **kw):
@@ -468,12 +574,33 @@ def run_training(cfg):
             with open(os.path.join(run_dir, "log.jsonl"), "a") as f:
                 f.write(json.dumps(dict(logs or {}, step=state.global_step)) + "\n")
 
+        def on_step_begin(self, args, state, control, **kw):
+            meter["t"], meter["real"], meter["padded"] = time.time(), 0, 0
+
+        def on_step_end(self, args, state, control, **kw):
+            dt = time.time() - meter["t"]
+            row = {"step": state.global_step, "sec": round(dt, 2), "real_tokens": meter["real"],
+                   "padded_tokens": meter["padded"], "tok_s": round(meter["padded"] / max(dt, 1e-6)),
+                   "real_tok_s": round(meter["real"] / max(dt, 1e-6)),
+                   "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1)}
+            meter["steps"].append(row)
+            print("step " + json.dumps(row))
+            with open(os.path.join(run_dir, "steps.jsonl"), "a") as f:
+                f.write(json.dumps(row) + "\n")
+
     lengths = [len(e["input_ids"]) for e in data["train"]]
 
     class LengthGroupedTrainer(Trainer):
         """Batches of similar length (see length_grouped_batches), so short
         messages are not padded to the longest one in a random batch."""
         epoch = 0
+
+        def training_step(self, model, inputs, *a, **kw):
+            m = inputs.get("attention_mask")
+            if m is not None:
+                meter["real"] += int(m.sum())
+                meter["padded"] += int(m.numel())
+            return super().training_step(model, inputs, *a, **kw)
 
         def get_train_dataloader(self):
             if not cfg["length_grouping"]:
@@ -496,27 +623,40 @@ def run_training(cfg):
 
     args = TrainingArguments(
         output_dir=os.path.join(run_dir, "checkpoints"),
-        num_train_epochs=cfg["epochs"], learning_rate=cfg["lr"], lr_scheduler_type="cosine",
+        num_train_epochs=cfg["epochs"], max_steps=cfg.get("max_steps") or -1,
+        learning_rate=cfg["lr"], lr_scheduler_type="cosine",
         warmup_steps=max(1, math.ceil(cfg["warmup_ratio"] * total_steps)),
         per_device_train_batch_size=micro, per_device_eval_batch_size=micro,
         gradient_accumulation_steps=accum, gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         bf16=True, optim="paged_adamw_8bit", weight_decay=0.0, max_grad_norm=1.0,
-        logging_steps=5, eval_strategy="steps", eval_steps=eval_steps,
+        logging_steps=cfg.get("logging_steps", 5), eval_strategy="steps", eval_steps=eval_steps,
         save_strategy="steps", save_steps=eval_steps, save_total_limit=2,
         load_best_model_at_end=True, metric_for_best_model="eval_loss", greater_is_better=False,
-        report_to="none", remove_unused_columns=False, seed=cfg["seed_int"],
+        report_to="none", remove_unused_columns=False, label_names=["labels"], seed=cfg["seed_int"],
         dataloader_num_workers=2)
     trainer = LengthGroupedTrainer(model=model, args=args, train_dataset=data["train"],
                                    eval_dataset=data["val"], data_collator=collate,
                                    callbacks=[CommitVolume()])
+    t_train = time.time()
     result = trainer.train()
+    train_s = time.time() - t_train
     # load_best_model_at_end has put the best checkpoint back in place.
     best_dir = os.path.join(run_dir, "adapter")
     trainer.model.save_pretrained(best_dir)
     tok.save_pretrained(best_dir)
+    steps = meter["steps"][1:] or meter["steps"]  # the first step includes kernel warm-up
     summary = {"train": result.metrics, "best_checkpoint": trainer.state.best_model_checkpoint,
-               "best_eval_loss": trainer.state.best_metric, "total_steps": trainer.state.global_step}
+               "best_eval_loss": trainer.state.best_metric, "total_steps": trainer.state.global_step,
+               "load_s": cfg.get("_load_s"), "train_wall_s": round(train_s, 1),
+               "first_step_s": meter["steps"][0]["sec"] if meter["steps"] else None,
+               "mean_step_s": round(sum(r["sec"] for r in steps) / max(1, len(steps)), 2),
+               "padded_tok_s": round(sum(r["padded_tokens"] for r in steps) / max(1e-6, sum(r["sec"] for r in steps))),
+               "real_tok_s": round(sum(r["real_tokens"] for r in steps) / max(1e-6, sum(r["sec"] for r in steps))),
+               "peak_allocated_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1),
+               "peak_reserved_gb": round(torch.cuda.max_memory_reserved() / 1e9, 1),
+               "losses": [{k: r.get(k) for k in ("step", "loss", "eval_loss", "grad_norm") if k in r}
+                          for r in trainer.state.log_history]}
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     runs_vol.commit()
@@ -537,6 +677,8 @@ def run_eval(cfg):
     model.eval()
     tok.padding_side = "left"
     rows = _read_jsonl(os.path.join(DATA_MOUNT, cfg["data_subdir"], "%s.jsonl" % cfg["split"]), cfg["limit"])
+    import time
+    t_gen, new_tokens = time.time(), 0
     stop = [tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")]
     torch.manual_seed(cfg["seed_int"])
     out = []
@@ -550,11 +692,14 @@ def run_eval(cfg):
             gen = model.generate(**enc, max_new_tokens=cfg["max_new_tokens"], do_sample=cfg["temperature"] > 0,
                                  temperature=cfg["temperature"] or None, top_p=0.8, top_k=20,
                                  eos_token_id=stop, pad_token_id=tok.pad_token_id)
-        for r, g in zip(batch, gen[:, enc["input_ids"].shape[1]:]):
+        new = gen[:, enc["input_ids"].shape[1]:]
+        new_tokens += int(sum(int((g != tok.pad_token_id).sum()) for g in new))
+        for r, g in zip(batch, new):
             out.append({"id": r.get("id"), "input": r["messages"][1]["content"],
                         "model": tok.decode(g, skip_special_tokens=True).strip(),
                         "target": r["messages"][2]["content"]})
-        print("generated %d/%d" % (len(out), len(rows)))
+        print("generated %d/%d (%.0f s, %d new tokens so far, peak %.1f GB)" % (
+            len(out), len(rows), time.time() - t_gen, new_tokens, torch.cuda.max_memory_allocated() / 1e9))
     tag = "base" if cfg["no_adapter"] else "adapter"
     eval_dir = os.path.join(run_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
@@ -593,18 +738,24 @@ if modal is not None:
     }
 
     @app.function(volumes={HF_MOUNT: volumes[HF_MOUNT]}, cpu=4, memory=8192, timeout=3600)
-    def download_model():
+    def download_model(base_model=BASE_MODEL, base_revision=BASE_REVISION):
         """CPU only: fill the HF cache volume so the GPU never waits on a download."""
+        import time
         from huggingface_hub import snapshot_download
-        path = snapshot_download(BASE_MODEL, revision=BASE_REVISION)
+        t0 = time.time()
+        path = snapshot_download(base_model, revision=base_revision)
+        t1 = time.time()
         volumes[HF_MOUNT].commit()
-        return path
+        size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(path) for f in fs)
+        print("hf cache: %.1f GB, snapshot %.0f s, commit %.0f s" % (size / 1e9, t1 - t0, time.time() - t1))
+        return {"path": path, "gb": round(size / 1e9, 1), "snapshot_s": round(t1 - t0), "commit_s": round(time.time() - t1)}
 
-    @app.function(volumes=volumes, gpu="H100", cpu=8, memory=65536, timeout=8 * 3600)
+    # Hard caps: with_options may only lower these (see _timeout).
+    @app.function(volumes=volumes, gpu="H100", cpu=8, memory=65536, timeout=TRAIN_TIMEOUT_MIN * 60)
     def train_remote(cfg):
         return run_training(cfg)
 
-    @app.function(volumes=volumes, gpu="H100", cpu=8, memory=65536, timeout=2 * 3600)
+    @app.function(volumes=volumes, gpu="H100", cpu=8, memory=65536, timeout=EVAL_TIMEOUT_MIN * 60)
     def eval_remote(cfg):
         return run_eval(cfg)
 
@@ -618,20 +769,43 @@ def _need_modal():
                          "  uv run --no-project --with %s python -I train/modal_train.py ..." % MODAL_CLIENT)
 
 
-def _guard(args):
-    profile = check_profile(args.profile, skip_workspace_check=args.skip_workspace_check)
+def _guard(args, starts_app=True):
+    """Profile, workspace and environment checks; on the Atira workspace also
+    the environment allowlist and the app-name collision check."""
+    allow = getattr(args, "allow_atira_workspace", False)
+    workspaces = None if args.skip_workspace_check else lookup_workspaces()
+    profile = check_profile(args.profile, workspaces=workspaces, skip_workspace_check=args.skip_workspace_check,
+                            allow_atira=allow)
+    ws = (workspaces or {}).get(profile)
+    atira = is_atira(profile, ws)
+    if atira and args.skip_workspace_check:
+        raise Refused("--skip-workspace-check is not allowed on the Atira workspace.")
+    modal_env = args.modal_env or os.environ.get("MODAL_ENVIRONMENT")
+    if atira:
+        check_atira_env(modal_env)
     os.environ["MODAL_PROFILE"] = profile
+    if modal_env:
+        os.environ["MODAL_ENVIRONMENT"] = modal_env
     _need_modal()
     active = getattr(getattr(modal, "config", None), "_profile", None)
     if active != profile:
         raise Refused("the modal client loaded profile %r, not %r" % (active, profile))
-    print("modal profile: %s (workspace checked)" % profile if not args.skip_workspace_check
-          else "modal profile: %s (workspace NOT checked)" % profile)
+    if modal_env and modal.config.config.get("environment") != modal_env:
+        raise Refused("the modal client resolves environment %r, not %r" % (
+            modal.config.config.get("environment"), modal_env))
+    print("modal profile: %s, workspace %s, environment %s%s" % (
+        profile, ws or "NOT checked", modal_env or "(profile default)",
+        " (Atira workspace, allowed by --allow-atira-workspace)" if atira else ""))
+    if atira and starts_app:
+        apps = list_apps(modal_env)
+        check_app_collision(apps)
+        print("apps in %s: %d, none named %s (ephemeral run, nothing is deployed)" % (
+            modal_env, len(apps), APP_NAME))
     return profile
 
 
 def upload(args):
-    _guard(args)
+    _guard(args, starts_app=False)
     _upload_data(args)
 
 
@@ -647,15 +821,40 @@ def _cfg(args, **extra):
     cfg = {k: getattr(args, k) for k in (
         "run", "data_subdir", "max_seq_len", "lora_r", "lora_alpha", "lora_dropout", "epochs", "lr",
         "warmup_ratio", "effective_batch", "micro_batch", "eval_steps", "seed", "length_grouping")}
+    for k in ("max_steps", "val_limit", "logging_steps", "smoke"):
+        if hasattr(args, k):
+            cfg[k] = getattr(args, k)
     cfg["lora_modules"] = [m for m in args.lora_modules.split(",") if m]
     cfg["seed_int"] = int(hashlib.sha256(args.seed.encode()).hexdigest()[:8], 16)
     cfg["gpu"] = args.gpu
-    cfg["base_model"], cfg["base_revision"], cfg["pinned"] = BASE_MODEL, BASE_REVISION, list(PINNED)
+    if args.base_model != BASE_MODEL and args.base_revision == BASE_REVISION:
+        raise Refused("--base-model %s needs its own --base-revision (a commit sha)." % args.base_model)
+    cfg["base_model"], cfg["base_revision"], cfg["pinned"] = args.base_model, args.base_revision, list(PINNED)
     cfg.update(extra)
     return cfg
 
 
+def _timeout_min(args):
+    """The hard GPU timeout for this command, in minutes."""
+    if args.cmd == "eval":
+        return EVAL_TIMEOUT_MIN
+    return SMOKE_TIMEOUT_MIN if getattr(args, "smoke", False) else TRAIN_TIMEOUT_MIN
+
+
+def print_ceiling(args):
+    rate = GPUS[args.gpu]["usd_per_hour"]
+    minutes = _timeout_min(args)
+    print("  hard cap: %s function timeout %d min => at most $%.2f of %s time for this job" % (
+        args.cmd if not getattr(args, "smoke", False) else "smoke", minutes, minutes / 60 * rate, args.gpu))
+
+
 def train(args):
+    if args.smoke:
+        args.max_steps = args.max_steps or 20
+        if args.max_steps > SMOKE_MAX_STEPS:
+            raise Refused("--smoke runs at most %d steps (got --max-steps %d)." % (SMOKE_MAX_STEPS, args.max_steps))
+    if args.max_steps < 0:
+        raise Refused("--max-steps must be >= 0")
     stats, problems = summarise_data(args.data, args.max_seq_len, args.micro_batch)
     print("data: %s" % args.data)
     for split in SPLITS:
@@ -674,8 +873,12 @@ def train(args):
     if not stats["train"]["n"]:
         raise SystemExit("no training examples")
     est = estimate(stats, args.gpu, args.epochs, args.effective_batch, args.micro_batch, args.eval_steps,
-                   tokens_per_s=args.assume_tokens_per_s)
+                   tokens_per_s=args.assume_tokens_per_s, max_steps=args.max_steps, val_limit=args.val_limit)
     print_estimate(est)
+    print_ceiling(args)
+    if est["hours"] * 60 > _timeout_min(args):
+        print("  WARNING: the estimate (%.0f min) is over the %d min timeout; the job would be cut off "
+              "(checkpoints are kept every eval)." % (est["hours"] * 60, _timeout_min(args)))
     if args.scale_to:
         scale = args.scale_to / max(1, total)
         print_estimate(estimate(stats, args.gpu, args.epochs, args.effective_batch, args.micro_batch,
@@ -692,11 +895,14 @@ def train(args):
     _guard(args)
     _upload_data(args)
     cfg = _cfg(args, confirm_spend=True)
-    timeout = int(min(24, max(2, est["hours"] * 2.5)) * 3600)
+    timeout = _timeout_min(args) * 60
+    import time
     with modal.enable_output():
-        with app.run(detach=args.detach):
+        with app.run(detach=args.detach, environment_name=args.modal_env or None):
             print("filling the HF cache (CPU)...")
-            download_model.remote()
+            t0 = time.time()
+            print("hf cache: %s, %.0f s wall" % (json.dumps(download_model.remote(args.base_model, args.base_revision)),
+                                                 time.time() - t0))
             call = train_remote.with_options(gpu=args.gpu, timeout=timeout).spawn(cfg)
             print("training started: function call %s, run %s, gpu %s" % (call.object_id, args.run, args.gpu))
             if args.detach:
@@ -709,13 +915,16 @@ def train(args):
 def evaluate(args):
     if not args.confirm_spend:
         raise Refused("eval starts a paid %s job; rerun with --confirm-spend once spending is approved." % args.gpu)
+    print("eval: run %s, %s split of %s, limit %s, max_new_tokens %d, batch %d" % (
+        args.run, args.split, args.data_subdir, args.limit or "none", args.max_new_tokens, args.eval_batch))
+    print_ceiling(args)
     _guard(args)
     cfg = _cfg(args, confirm_spend=True, split=args.split, limit=args.limit, no_adapter=args.no_adapter,
                max_new_tokens=args.max_new_tokens, temperature=args.temperature, eval_batch=args.eval_batch)
     with modal.enable_output():
-        with app.run():
-            download_model.remote()
-            records = eval_remote.with_options(gpu=args.gpu).remote(cfg)
+        with app.run(environment_name=args.modal_env or None):
+            download_model.remote(args.base_model, args.base_revision)
+            records = eval_remote.with_options(gpu=args.gpu, timeout=_timeout_min(args) * 60).remote(cfg)
     out_dir = os.path.join(ROOT, "data/eval", args.run)
     os.makedirs(out_dir, exist_ok=True)
     tag = "base" if args.no_adapter else "adapter"
@@ -735,7 +944,12 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
-        p.add_argument("--profile", help="Modal profile (or MODAL_PROFILE); must be personal, never Atira")
+        p.add_argument("--profile", help="Modal profile (or MODAL_PROFILE); required, never implicit")
+        p.add_argument("--modal-env", default=None,
+                       help="Modal environment (or MODAL_ENVIRONMENT); required on the Atira workspace (%s)"
+                       % "/".join(ATIRA_ALLOWED_ENVS))
+        p.add_argument("--allow-atira-workspace", action="store_true",
+                       help="opt in to the Atira workspace (approved spend only); refused otherwise")
         p.add_argument("--skip-workspace-check", action="store_true")
         p.add_argument("--data", default=os.path.join(ROOT, "data/train"))
         p.add_argument("--data-subdir", default="train", help="directory inside the irulan-data volume")
@@ -754,7 +968,13 @@ def build_parser():
         p.add_argument("--micro-batch", type=int, default=8)
         p.add_argument("--eval-steps", type=int, default=0, help="0 = about ten evals per run")
         p.add_argument("--seed", default="irulan-train-v1")
+        p.add_argument("--base-model", default=BASE_MODEL,
+                       help="override only for a pipeline check with a small model of the same family")
+        p.add_argument("--base-revision", default=BASE_REVISION)
         p.add_argument("--no-length-grouping", dest="length_grouping", action="store_false")
+        p.add_argument("--max-steps", type=int, default=0, help="stop after this many optimizer steps (0 = full)")
+        p.add_argument("--val-limit", type=int, default=0, help="evaluate on the first N val examples (0 = all)")
+        p.add_argument("--logging-steps", type=int, default=5)
 
     t = sub.add_parser("train", help="validate, estimate, and (with --confirm-spend) train")
     common(t)
@@ -762,6 +982,9 @@ def build_parser():
     t.add_argument("--scale-to", type=int, default=0, help="also estimate for this many pairs")
     t.add_argument("--assume-tokens-per-s", type=float, default=None)
     t.add_argument("--detach", action="store_true", help="return once the job is started")
+    t.add_argument("--smoke", action="store_true",
+                   help="short check run: %d min timeout, --max-steps default 20 (at most %d)" % (
+                       SMOKE_TIMEOUT_MIN, SMOKE_MAX_STEPS))
 
     e = sub.add_parser("eval", help="generate rewrites for held-out inputs (needs --confirm-spend)")
     common(e)

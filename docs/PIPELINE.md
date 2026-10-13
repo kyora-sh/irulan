@@ -276,26 +276,50 @@ pinned) with QLoRA on Modal. It never spends money by accident:
   assumption. `--scale-to N` adds the estimate for N pairs.
 - Every GPU job (train and eval) needs `--confirm-spend`.
 - The Modal profile must be named explicitly (`--profile` or `MODAL_PROFILE`;
-  the active profile is never used implicitly), must exist in
-  `~/.modal.toml`, and neither its name nor its workspace (looked up with
-  `modal profile list --json`) may match `atira`. `MODAL_TOKEN_ID` /
-  `MODAL_TOKEN_SECRET` in the environment are refused, since they override
-  the profile. `modal run` / `modal deploy` on the file are refused at import.
+  the active profile is never used implicitly) and must exist in
+  `~/.modal.toml`. `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` in the environment
+  are refused, since they override the profile. `modal run` / `modal deploy`
+  on the file are refused at import; jobs run as ephemeral apps
+  (`app.run()`), and nothing here deploys.
+- A profile whose name or workspace (looked up with
+  `modal profile list --json`) matches `atira` is refused unless
+  `--allow-atira-workspace` is passed. With it, the workspace check cannot be
+  skipped, `--modal-env` must name `testing` or `dev` (never prod), and the
+  launcher lists the apps there (`modal app list --json`, read-only) and
+  refuses if an app named `irulan-train` is deployed or running.
+- Hard Modal timeouts: train 90 min, `--smoke` 25 min, eval 30 min. Before
+  starting, the launcher prints the estimate and the timeout's dollar
+  ceiling. `--max-steps N` stops training after N optimizer steps; `--smoke`
+  defaults it to 20 and refuses more than 50.
 
 ```sh
 make train-dry-run ARGS="--scale-to 10100"           # local, free
 
 M="uv run --no-project --with modal==1.4.3 python -I train/modal_train.py"
-$M upload --profile <personal>                        # data/train -> volume irulan-data:/train
-$M train  --profile <personal> --confirm-spend [--gpu H100|A100-80GB|B200] [--run NAME] [--detach]
-$M eval   --profile <personal> --confirm-spend --run NAME [--limit 200] [--no-adapter]
+P="--profile <profile>"   # Atira: --profile atira --allow-atira-workspace --modal-env testing
+$M upload $P                                          # data/train -> volume irulan-data:/train
+$M train  $P --confirm-spend [--gpu H100|A100-80GB|B200] [--run NAME] [--max-steps N] [--detach]
+$M eval   $P --confirm-spend --run NAME [--limit 200] [--no-adapter]
+
+# smoke test: a separate training set and volume prefix, 20 steps, small val
+python3 -I pipeline.py prepare --pairs <snapshot>.jsonl --out data/train_smoke
+$M upload $P --data data/train_smoke --data-subdir smoke
+$M train  $P --confirm-spend --smoke --data data/train_smoke --data-subdir smoke \
+   --run smoke-1 --eval-steps 10 --val-limit 32 --logging-steps 1
+$M eval   $P --confirm-spend --data-subdir smoke --run smoke-1 --limit 10
 ```
+
+`--base-model` / `--base-revision` swap in a small model of the same family
+(for example `Qwen/Qwen3.5-0.8B` on `--gpu L4`) to check the whole pipeline
+for cents before the 27B run.
 
 `train` uploads the data, fills the HF cache volume (`irulan-hf-cache`) on a
 CPU container, then trains on one GPU (H100 80GB by default). Outputs go to
 the `irulan-runs` volume under the run name: `checkpoints/` (latest and
-best), `adapter/` (the best checkpoint's adapter), `log.jsonl`, `config.json`
-and `summary.json`. Fetch them with `modal volume get irulan-runs NAME/adapter`.
+best), `adapter/` (the best checkpoint's adapter), `log.jsonl`, `config.json`,
+`steps.jsonl` (seconds, tokens and peak memory per step) and `summary.json`
+(load time, mean step time, tokens/s, peak memory, losses). Fetch them with
+`modal volume get irulan-runs NAME/adapter`.
 
 Training setup (all flags):
 

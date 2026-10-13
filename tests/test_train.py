@@ -98,6 +98,14 @@ class EstimateTests(unittest.TestCase):
         self.assertLess(lo, e["usd"])
         self.assertGreater(hi, e["usd"])
 
+    def test_max_steps_shortens_the_estimate(self):
+        full = mt.estimate(self.stats(), "H100")
+        short = mt.estimate(self.stats(), "H100", max_steps=20, eval_every=10, val_limit=50)
+        self.assertEqual(short["total_steps"], 20)
+        self.assertEqual(short["evals"], 3)
+        self.assertLess(short["work_tokens"], full["work_tokens"] / 20)
+        self.assertLess(short["usd"], full["usd"])
+
     def test_scale(self):
         a = mt.estimate(self.stats(), "H100")
         b = mt.estimate(self.stats(), "H100", scale=2.0)
@@ -128,11 +136,67 @@ class GuardTests(unittest.TestCase):
 
     def test_atira_profile_and_workspace_are_refused(self):
         for name in ("atira", "Atira-dev"):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as cm:
                 self.check(name, profiles=self.PROFILES + ["Atira-dev"])
+            self.assertIn("--allow-atira-workspace", str(cm.exception))
         with self.assertRaises(SystemExit) as cm:
             self.check("personal", workspaces={"personal": "atira"})
         self.assertIn("workspace", str(cm.exception))
+
+    def test_atira_needs_the_explicit_opt_in(self):
+        self.assertEqual(self.check("atira", allow_atira=True), "atira")
+        self.assertEqual(self.check("personal", workspaces={"personal": "atira"}, allow_atira=True), "personal")
+        self.assertTrue(mt.is_atira("atira", "atira"))
+        self.assertTrue(mt.is_atira("personal", "atira"))
+        self.assertFalse(mt.is_atira("personal", "someone-personal"))
+        # the opt-in does not relax anything else
+        with self.assertRaises(SystemExit):
+            self.check(None, allow_atira=True)
+        with self.assertRaises(SystemExit):
+            self.check("atira", env={"MODAL_TOKEN_SECRET": "x"}, allow_atira=True)
+        with self.assertRaises(SystemExit):
+            self.check("atira", workspaces={}, allow_atira=True)
+
+    def test_atira_environment_must_be_named_and_not_prod(self):
+        for bad in (None, "", "prod", "main", "staging"):
+            with self.assertRaises(SystemExit):
+                mt.check_atira_env(bad)
+        self.assertEqual(mt.check_atira_env("testing"), "testing")
+
+    def test_app_name_collision_is_refused(self):
+        others = [{"name": "qwen", "state": "deployed", "id": "ap-1"}]
+        self.assertTrue(mt.check_app_collision(others))
+        self.assertTrue(mt.check_app_collision(others + [{"name": mt.APP_NAME, "state": "stopped", "id": "ap-2"}]))
+        for state in ("deployed", "ephemeral", "ephemeral (detached)"):
+            with self.assertRaises(SystemExit) as cm:
+                mt.check_app_collision(others + [{"name": mt.APP_NAME, "state": state, "id": "ap-3"}])
+            self.assertIn("already exists", str(cm.exception))
+        with self.assertRaises(SystemExit):
+            mt.check_app_collision(None)
+
+    def test_hard_timeouts_and_never_deploy(self):
+        self.assertEqual((mt.TRAIN_TIMEOUT_MIN, mt.SMOKE_TIMEOUT_MIN, mt.EVAL_TIMEOUT_MIN), (90, 25, 30))
+        ap = mt.build_parser()
+        self.assertEqual(mt._timeout_min(ap.parse_args(["train"])), 90)
+        self.assertEqual(mt._timeout_min(ap.parse_args(["train", "--smoke"])), 25)
+        self.assertEqual(mt._timeout_min(ap.parse_args(["eval"])), 30)
+        with open(PATH) as f:
+            src = f.read()
+        self.assertNotIn(".deploy(", src)
+        self.assertNotIn("8 * 3600", src)
+
+    def test_smoke_caps_max_steps(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_splits(d, [rec(i) for i in range(64)], [rec(100)], [rec(200)])
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    mt.main(["train", "--dry-run", "--smoke", "--max-steps", "500", "--data", d])
+                self.assertIn("at most", str(cm.exception))
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    est = mt.main(["train", "--dry-run", "--smoke", "--data", d])
+        self.assertEqual(est["total_steps"], 4)  # fewer than the default 20 smoke steps
+        self.assertIn("hard cap: smoke function timeout 25 min", buf.getvalue())
 
     def test_unknown_profile_or_unverified_workspace_is_refused(self):
         with self.assertRaises(SystemExit):
