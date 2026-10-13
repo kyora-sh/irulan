@@ -44,6 +44,8 @@ line by line, and keeps only what the person typed:
   (TUI glyphs, wrapped-line indentation) are stripped. A message that was
   mostly code or logs is kept only if at least 5 words of the writer's own
   prose remain.
+- Text the person did not type is stripped or dropped (see "Authorship"
+  below), and mainly non-English messages are dropped (see "Language").
 - Exact dedupe after whitespace and case normalisation. Short messages
   (3 words or fewer) are not deduped but capped at 3 copies each.
 
@@ -58,9 +60,55 @@ Outputs:
 | `data/clean/cc_messages.jsonl` | scrubbed training targets |
 | `data/entity_candidates.tsv` | possible names to review |
 | `data/stats/cc_stats.json` | counts only |
+| `data/stats/cc_drops.jsonl` | every authorship or language drop and strip, with its reason |
 
 Each record has `id`, `project` (the transcript's project directory name),
 `session_id`, `timestamp`, `words`, `lines` and `text`.
+
+### Authorship
+
+The targets are text the person typed themselves, so `filters.author_check`
+scores every blank-line-separated paragraph for signs of a paste:
+
+- register: two or more capitalised sentences ending in full stops, a
+  capitalised sentence with a closing full stop and no shorthand, em dashes,
+  curly quotes, `Label: text` report leads (the writer types short lowercase
+  lines with shorthand such as `rq`, `pls`, `yk`, `->`, which pull the score
+  down);
+- LLM output: markdown headers, tables, bold, links, checkboxes, capitalised
+  bullet lists, check marks, assistant phrases ("I've", "Here's", "Let me",
+  "Next steps", "Your call");
+- logs: lines sharing a `source:` prefix, build and package-manager output,
+  exceptions and SQL, pytest dumps, `file:line:col`;
+- quotes: Claude Code's quote bar, `> ` lines, a paragraph that is one long
+  quotation, list items ending in `;`;
+- transcripts, LinkedIn profiles and feeds, emails, `You are ...` templates,
+  and lines that recur verbatim in 4+ sessions (computed over the whole
+  extract before dedupe; lines with the writer's shorthand are their own
+  stock phrases and are exempt).
+
+A paragraph scoring at or above `par_threshold` (3) is stripped, along with
+any capitalised full-stop sentence left next to it. The message is kept if
+at least `min_keep_words` (5) prose words remain and what is left does not
+itself read as a paste; otherwise it is dropped as `not_typed_<category>`.
+Transcripts (filler words, speaker or timestamp lines), profiles (3+
+LinkedIn/CV markers), emails (header lines) and messages over `max_words`
+(600) are dropped whole.
+
+### Language
+
+English only for v1. `filters.language_check` counts English and German
+stopwords (umlauts and `ß` count as German). A message with mostly German
+markers loses its German paragraphs and is kept only if 5+ words of mainly
+English prose remain; a few German words in an English message are fine.
+`--keep-non-english` turns this off.
+
+### Tuning
+
+All thresholds live in `filters.AUTHOR_DEFAULTS`. Override them with a JSON
+file (`--filter-config my.json`) or the common flags `--par-threshold`,
+`--max-words` and `--min-keep-words`; `--no-author-filter` turns the
+authorship pass off. The effective config is recorded in the stats file.
 
 ## Scrubbing
 

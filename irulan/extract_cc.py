@@ -8,6 +8,7 @@ Outputs (all under data/, which is git-ignored):
     data/clean/cc_messages.jsonl    scrubbed training targets
     data/entity_candidates.tsv      names to review into scrub/denylist.txt
     data/stats/cc_stats.json        counts only
+    data/stats/cc_drops.jsonl       every authorship/language drop or strip, with its reason
 """
 
 import argparse
@@ -137,6 +138,55 @@ def dedupe(records, dropped, key_fn=filters.dedupe_key):
     return out
 
 
+def author_pass(records, cfg, keep_non_english, dropped, counts, log):
+    """Corpus-level pass over cleaned turns, before dedupe: strip or drop
+    text the writer did not type (see filters.author_check), then drop mainly
+    non-English messages. Every drop and strip goes to `log`."""
+    hot = frozenset()
+    if cfg["enabled"]:
+        hot = filters.template_lines(records, cfg["template_min_words"], cfg["template_min_sessions"])
+    counts["template_lines"] = len(hot)
+    out = []
+    for r in records:
+        base = {"session_id": r["session_id"], "timestamp": r["timestamp"], "project": r["project"],
+                "words": len(r["text"].split())}
+        text, reason, info = filters.author_check(r["text"], cfg, hot)
+        if reason is None and cfg["language"] and not keep_non_english:
+            en, de = filters.language_counts(text)
+            text, reason, n_lang = filters.language_check(text, cfg)
+            info = dict(info, en=en, de=de)
+            if n_lang:
+                info["stripped"] = info["stripped"] + ["non_english"] * n_lang
+        if reason:
+            dropped[reason] += 1
+            log.append(dict(base, action="drop", reason=reason, scores=info.get("scores"),
+                            en=info.get("en"), de=info.get("de"), text=r["text"]))
+            continue
+        if info["stripped"]:
+            counts["author_messages_stripped"] += 1
+            counts["author_paragraphs_stripped"] += len(info["stripped"])
+            for cat in info["stripped"]:
+                counts["stripped_" + cat] += 1
+            log.append(dict(base, action="strip", reason="stripped_" + info["stripped"][0],
+                            categories=info["stripped"], scores=info["scores"], text=r["text"], kept=text))
+            r = dict(r, text=text)
+        out.append(r)
+    return out
+
+
+def load_filter_config(path, overrides):
+    cfg = dict(filters.AUTHOR_DEFAULTS)
+    if path:
+        with open(path, encoding="utf-8") as f:
+            extra = json.load(f)
+        unknown = set(extra) - set(cfg)
+        if unknown:
+            sys.exit("unknown filter config keys: %s" % ", ".join(sorted(unknown)))
+        cfg.update(extra)
+    cfg.update({k: v for k, v in overrides.items() if v is not None})
+    return cfg
+
+
 def with_meta(r, text):
     rec = dict(r)
     rec["text"] = text
@@ -218,6 +268,15 @@ def main(argv=None):
     ap.add_argument("--stats", default=os.path.join(ROOT, "data/stats/cc_stats.json"))
     ap.add_argument("--denylist", default=os.path.join(ROOT, "scrub/denylist.txt"))
     ap.add_argument("--min-entity-count", type=int, default=2)
+    ap.add_argument("--drop-log", default=os.path.join(ROOT, "data/stats/cc_drops.jsonl"),
+                    help="jsonl with every authorship/language drop and strip and its reason")
+    ap.add_argument("--filter-config", help="JSON file overriding filters.AUTHOR_DEFAULTS thresholds")
+    ap.add_argument("--no-author-filter", action="store_true",
+                    help="keep pasted transcripts, profiles, LLM output and templates")
+    ap.add_argument("--keep-non-english", action="store_true", help="skip the English-only language filter")
+    ap.add_argument("--par-threshold", type=int, help="paragraph paste score that strips it")
+    ap.add_argument("--max-words", type=int, help="drop messages longer than this")
+    ap.add_argument("--min-keep-words", type=int, help="prose words that must remain after a strip")
     ap.add_argument("--rescrub", action="store_true",
                     help="skip the transcript walk; re-read the raw extract and reapply scrubbing")
     args = ap.parse_args(argv)
@@ -228,7 +287,13 @@ def main(argv=None):
         rescrub(args)
         return
 
+    cfg = load_filter_config(args.filter_config, {
+        "par_threshold": args.par_threshold, "max_words": args.max_words,
+        "min_keep_words": args.min_keep_words, "enabled": False if args.no_author_filter else None})
     records, counts, dropped = walk(args.src)
+    log = []
+    records = author_pass(records, cfg, args.keep_non_english, dropped, counts, log)
+    write_jsonl(log, args.drop_log)
     kept_before_dedupe = len(records)
     records = dedupe(records, dropped)
     raw = []
@@ -241,6 +306,8 @@ def main(argv=None):
     extract_stats["passed_filters"] = kept_before_dedupe
     extract_stats["kept"] = len(raw)
     extract_stats["dropped"] = dict(dropped)
+    extract_stats["filter_config"] = cfg
+    extract_stats["keep_non_english"] = args.keep_non_english
     extract_stats["raw"] = stats.summarise(raw)
     rescrub(args, extract_stats)
 

@@ -3,8 +3,9 @@ PY := python3 -I
 .PHONY: extract-cc rescrub stats test generate check-pairs sample review
 
 # Walk ~/.claude/projects, write data/raw + data/clean + entity candidates.
+# Pass filter flags via ARGS, e.g. ARGS="--keep-non-english".
 extract-cc:
-	$(PY) pipeline.py extract-cc
+	$(PY) pipeline.py extract-cc $(ARGS)
 
 # Reapply scrubbing to data/raw after editing scrub/denylist.txt (no re-walk).
 rescrub:

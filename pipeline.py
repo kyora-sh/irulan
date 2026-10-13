@@ -3,7 +3,7 @@
 `-I` keeps the current directory off sys.path, so this file adds its own
 directory explicitly and dispatches to the package.
 
-    python3 -I pipeline.py extract-cc [--src DIR] ...
+    python3 -I pipeline.py extract-cc [--src DIR] [--keep-non-english] [--filter-config F] ...
     python3 -I pipeline.py rescrub
     python3 -I pipeline.py stats
     python3 -I pipeline.py test
