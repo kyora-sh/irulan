@@ -11,6 +11,7 @@ directory explicitly and dispatches to the package.
     python3 -I pipeline.py check-pairs data/pairs/NAME.jsonl ...
     python3 -I pipeline.py sample
     python3 -I pipeline.py review --runs data/pairs/A.jsonl data/pairs/B.jsonl
+    python3 -I pipeline.py prepare --pairs data/pairs/NAME.jsonl [--out data/train] ...
 """
 
 import os
@@ -49,6 +50,9 @@ def main():
     elif cmd == "review":
         from irulan import sample
         sample.main_review(rest)
+    elif cmd == "prepare":
+        from irulan import prepare
+        prepare.main(rest)
     elif cmd == "test":
         import unittest
         suite = unittest.defaultTestLoader.discover(os.path.join(HERE, "tests"), top_level_dir=HERE)

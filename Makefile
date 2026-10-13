@@ -1,6 +1,6 @@
 PY := python3 -I
 
-.PHONY: extract-cc rescrub stats test generate check-pairs sample review
+.PHONY: extract-cc rescrub stats test generate check-pairs sample review prepare train-dry-run
 
 # Walk ~/.claude/projects, write data/raw + data/clean + entity candidates.
 # Pass filter flags via ARGS, e.g. ARGS="--keep-non-english".
@@ -33,3 +33,11 @@ sample:
 # Side-by-side review: make review ARGS="--runs data/pairs/a.jsonl data/pairs/b.jsonl"
 review:
 	$(PY) pipeline.py review $(ARGS)
+
+# Training set from a pairs file: make prepare ARGS="--pairs data/pairs/full_sol_v2.jsonl"
+prepare:
+	$(PY) pipeline.py prepare $(ARGS)
+
+# Check data/train and print the cost estimate. Local, no Modal, no GPU.
+train-dry-run:
+	$(PY) train/modal_train.py train --dry-run $(ARGS)

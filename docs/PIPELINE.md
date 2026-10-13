@@ -5,10 +5,12 @@ software engineer. Training pairs come from back-translation: real messages a
 person wrote are the targets, and a model later writes a "Claude-style"
 version of each as the input.
 
-This document covers step 1: extracting and scrubbing the human side. It
-calls no model and spends nothing.
+Step 1 extracts and scrubs the human side; it calls no model and spends
+nothing. Step 2 generates the inputs, step 3 builds the training set and
+step 4 trains and evaluates on Modal.
 
-Everything runs on Python 3 with the standard library only. Commands assume
+Everything runs on Python 3 with the standard library only (the training job
+itself runs in a Modal image with its own pinned packages). Commands assume
 the repo root as the working directory.
 
 ## Never commit data
@@ -208,3 +210,120 @@ from a call that ran tools. `sample` picks 15 messages of 15-29 words, 20 of
 30-59 and 15 of 60+ (skipping mostly-placeholder ones) and splits them evenly
 between the two variants; `review` writes a side-by-side markdown file and a
 per-model summary to `data/review/`.
+
+## Step 3: the training set
+
+```sh
+make prepare ARGS="--pairs data/pairs/full_sol_v2.jsonl"
+```
+
+`irulan/prepare.py` turns a pairs file into `data/train/` (git-ignored). It
+reads the pairs line by line and skips lines that do not parse, so it can run
+on a file a generation run is still appending to. Per pair, in order:
+
+1. ids in `data/exclude_ids.local.txt` (git-ignored, one id per line, `#`
+   comments) are dropped, as are ids no longer in `data/clean` (the extract
+   dropped them since; `--keep-missing-session` keeps them as their own
+   session).
+2. Input and target are rescrubbed with the current `scrub/denylist.txt` and
+   `irulan/scrub.py` rules, so a name added to the denylist after generation is
+   removed from both sides without touching `data/clean`.
+3. Targets under `--min-target-words` (2) words are dropped; short messages of
+   2-4 words are kept.
+4. `check_pairs` runs on the rescrubbed pair. Every flag drops the pair except
+   those in `--allow-flags` (default `preamble,answered`: `preamble` fires on
+   assistant lead-ins that mirror the target, such as "Okay, here is what is
+   left:", and `answered` is a loose heuristic). An input that talks about
+   the rewrite itself ("Here's the rewritten message:") is dropped regardless.
+5. Exact-duplicate inputs (after whitespace normalisation) are dropped.
+6. Placeholders are replaced with invented surrogates so the model never
+   learns to emit `<NAME>` and friends: fake first names, `example.com` /
+   `.org` / `.net` URLs and emails, RFC 5737 IPs (`192.0.2.x`, ...),
+   `host-07.internal`-style hosts, made-up repo paths, hex ids and obviously
+   fake secrets (`sk-test-...`). The n-th `<NAME>` of the input and the n-th
+   `<NAME>` of the target get the same value, per type; a pair whose input and
+   target hold a different number of some placeholder is dropped. Choices are
+   seeded per pair id, and denylisted terms are never drawn.
+
+The kept pairs are split 90/5/5 into train/val/test by session (project and
+session id from `data/clean`), so a session never spans two splits: sessions
+are shuffled with a fixed seed (`--seed`), val and test are filled to their
+share, and the rest is train. Large sessions therefore tend to land in train.
+
+Each split is chat-format jsonl:
+
+```json
+{"messages": [{"role": "system", "content": "<system_v1>"},
+              {"role": "user", "content": "<assistant-style input>"},
+              {"role": "assistant", "content": "<the writer's message>"}],
+ "id": "...", "system_version": "system_v1", "variant": "plain"}
+```
+
+The system prompt is versioned (`--system`, `prepare.SYSTEM_PROMPTS`).
+`data/train/stats.json` has counts only (per split, drop reasons, flags kept,
+rescrub replacements, surrogates, a chars/3.5 token estimate and the share
+over `--max-seq-len`); `data/train/drops.jsonl` has ids and reasons only.
+
+## Step 4: training and eval on Modal
+
+`train/modal_train.py` fine-tunes `Qwen/Qwen3.8-27B` (Apache 2.0, revision
+pinned) with QLoRA on Modal. It never spends money by accident:
+
+- `--dry-run` is local and needs neither Modal nor torch: it checks the
+  schema of the three splits (roles, empty content, leftover placeholders, ids
+  in two splits), counts examples over `--max-seq-len`, simulates batch
+  padding and prints steps, hours and dollars under a stated throughput
+  assumption. `--scale-to N` adds the estimate for N pairs.
+- Every GPU job (train and eval) needs `--confirm-spend`.
+- The Modal profile must be named explicitly (`--profile` or `MODAL_PROFILE`;
+  the active profile is never used implicitly), must exist in
+  `~/.modal.toml`, and neither its name nor its workspace (looked up with
+  `modal profile list --json`) may match `atira`. `MODAL_TOKEN_ID` /
+  `MODAL_TOKEN_SECRET` in the environment are refused, since they override
+  the profile. `modal run` / `modal deploy` on the file are refused at import.
+
+```sh
+make train-dry-run ARGS="--scale-to 10100"           # local, free
+
+M="uv run --no-project --with modal==1.4.3 python -I train/modal_train.py"
+$M upload --profile <personal>                        # data/train -> volume irulan-data:/train
+$M train  --profile <personal> --confirm-spend [--gpu H100|A100-80GB|B200] [--run NAME] [--detach]
+$M eval   --profile <personal> --confirm-spend --run NAME [--limit 200] [--no-adapter]
+```
+
+`train` uploads the data, fills the HF cache volume (`irulan-hf-cache`) on a
+CPU container, then trains on one GPU (H100 80GB by default). Outputs go to
+the `irulan-runs` volume under the run name: `checkpoints/` (latest and
+best), `adapter/` (the best checkpoint's adapter), `log.jsonl`, `config.json`
+and `summary.json`. Fetch them with `modal volume get irulan-runs NAME/adapter`.
+
+Training setup (all flags):
+
+| setting | default |
+|---|---|
+| quantisation | 4-bit NF4, double quant, bf16 compute; `lm_head`, `in_proj_a`, `in_proj_b` stay bf16 |
+| LoRA | r 32, alpha 32, dropout 0.05 (`--lora-r/--lora-alpha/--lora-dropout`) |
+| LoRA targets | text layers only: `self_attn.{q,k,v,o}_proj`, `linear_attn.{in_proj_qkv,in_proj_z,out_proj}`, `mlp.{gate,up,down}_proj` (`--lora-modules`) |
+| loss | assistant tokens only (the target and its end-of-turn token) |
+| prompt | the model's chat template with `enable_thinking=False`, so the assistant turn starts after an empty think block, as at inference |
+| length | `--max-seq-len` 1024; longer examples are dropped, never truncated |
+| schedule | 2 epochs, lr 1e-4 cosine, 3% warmup, effective batch 32 (micro-batch 8 x accumulation 4), paged 8-bit AdamW |
+| memory | gradient checkpointing, length-grouped batches (`--no-length-grouping` for plain random batches) |
+| eval | val loss every `--eval-steps` (default: about ten per run); best by val loss |
+
+Model notes: the checkpoint is `Qwen3_5ForConditionalGeneration` (a
+vision-language model; 64 text layers, 3 Gated DeltaNet linear-attention
+layers per full-attention layer). `AutoModelForCausalLM` maps it to
+`Qwen3_5ForCausalLM`, which loads the text stack only and skips the vision
+tower and the MTP head, so nothing needs freezing. It needs transformers
+>= 5.8; the image pins transformers 5.18.0, peft 0.21.2, bitsandbytes 0.50.2,
+accelerate 1.15.0, torch 2.13.0 and flash-linear-attention 0.5.2 (without it
+the DeltaNet layers fall back to a much slower PyTorch path). Unsloth also
+supports Qwen3.8 and is an option if speed matters.
+
+`eval` loads the base model in 4-bit plus the run's adapter (or no adapter,
+`--no-adapter`, as a baseline), generates rewrites for the test inputs
+(non-thinking sampling: temperature 0.7, top-p 0.8, top-k 20) and writes
+`data/eval/NAME/test_adapter.jsonl` (`id`, `input`, `model`, `target`), a
+blind side-by-side `test_adapter_blind.md` (A/B in seeded random order) and
+its key, `test_adapter_blind_key.json`.
