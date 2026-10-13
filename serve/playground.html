@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>irulan playground</title>
+<style>
+  :root {
+    --bg: #fafaf9; --panel: #ffffff; --text: #1c1917; --muted: #78716c; --line: #e7e5e4;
+    --accent: #2563eb; --accent-text: #ffffff; --err: #b91c1c; --code: #f5f5f4;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0a09; --panel: #1c1917; --text: #f5f5f4; --muted: #a8a29e; --line: #292524;
+      --accent: #60a5fa; --accent-text: #0c0a09; --err: #f87171; --code: #292524;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .muted { color: var(--muted); font-size: 13px; }
+  textarea { width: 100%; min-height: 200px; resize: vertical; padding: 12px; border-radius: 8px;
+             border: 1px solid var(--line); background: var(--panel); color: var(--text);
+             font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  textarea:focus, select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin: 12px 0 20px; }
+  label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  select, input[type=number] { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+                               background: var(--panel); color: var(--text); font-size: 13px; }
+  input[type=number] { width: 80px; }
+  button { padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel);
+           color: var(--text); font-size: 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .outputs { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  .outputs.two { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { .outputs.two { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .panel-head button { padding: 3px 10px; font-size: 12px; }
+  pre { margin: 0; padding: 12px; white-space: pre-wrap; word-wrap: break-word; min-height: 80px;
+        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  .stats { padding: 8px 12px; border-top: 1px solid var(--line); font: 12px/1.4 ui-monospace, monospace; color: var(--muted); }
+  .error { color: var(--err); }
+  #gate { max-width: 420px; margin: 15vh auto; padding: 0 16px; }
+  #gate input { width: 100%; padding: 10px; margin: 12px 0; border-radius: 6px; border: 1px solid var(--line);
+                background: var(--panel); color: var(--text); font: 14px ui-monospace, monospace; }
+  .hidden { display: none !important; }
+  #status { min-height: 20px; }
+</style>
+</head>
+<body>
+<div id="gate" class="hidden">
+  <h1>irulan playground</h1>
+  <p class="muted">Paste the access token. It is kept in this tab only (sessionStorage).</p>
+  <form id="gate-form"><input id="gate-token" type="password" autocomplete="off" placeholder="access token">
+  <button class="primary" type="submit">Continue</button></form>
+  <p id="gate-error" class="error"></p>
+</div>
+
+<main id="app" class="hidden">
+  <header>
+    <h1>irulan-swe playground</h1>
+    <span class="muted" id="model-info"></span>
+    <span style="flex:1"></span>
+    <button id="warm" title="Start the GPU container now (cold start takes a few minutes)">Warm up GPU</button>
+    <button id="logout" title="Forget the token in this tab">Lock</button>
+  </header>
+
+  <textarea id="input" placeholder="Paste Claude-style text here. Cmd/Ctrl+Enter to rewrite."></textarea>
+
+  <div class="controls">
+    <label>Adapter <select id="adapter"></select></label>
+    <label>Temperature <input id="temperature" type="number" min="0" max="1.5" step="0.05" value="0.3"></label>
+    <label>Max tokens <input id="max_tokens" type="number" min="1" max="2048" step="1" value="512"></label>
+    <label><input id="compare" type="checkbox"> Compare with base model</label>
+    <span style="flex:1"></span>
+    <button id="go" class="primary">Rewrite</button>
+  </div>
+  <div id="status" class="muted"></div>
+
+  <div id="outputs" class="outputs">
+    <section class="panel" id="panel-main">
+      <div class="panel-head"><span id="title-main">Rewrite</span><button data-copy="main">Copy</button></div>
+      <pre id="out-main"></pre>
+      <div class="stats" id="stats-main"></div>
+    </section>
+    <section class="panel hidden" id="panel-base">
+      <div class="panel-head"><span>Base model (no adapter)</span><button data-copy="base">Copy</button></div>
+      <pre id="out-base"></pre>
+      <div class="stats" id="stats-base"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  const KEY = "irulan-playground-token";
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get() { try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return mem; } },
+    set(v) { mem = v; try { sessionStorage.setItem(KEY, v); } catch (e) {} },
+    clear() { mem = ""; try { sessionStorage.removeItem(KEY); } catch (e) {} },
+  };
+  let mem = "";
+  let busy = false, timer = null;
+
+  async function api(path, opts = {}) {
+    const headers = Object.assign({"X-Playground-Token": store.get()}, opts.headers || {});
+    const res = await fetch(path, Object.assign({}, opts, {headers}));
+    if (res.status === 401) { store.clear(); showGate("Token rejected."); throw new Error("unauthorized"); }
+    return res;
+  }
+
+  function showGate(msg) {
+    $("app").classList.add("hidden"); $("gate").classList.remove("hidden");
+    $("gate-error").textContent = msg || ""; $("gate-token").focus();
+  }
+
+  async function boot() {
+    if (!store.get()) return showGate();
+    let data;
+    try { data = await (await api("/api/adapters")).json(); } catch (e) { return; }
+    $("gate").classList.add("hidden"); $("app").classList.remove("hidden");
+    $("model-info").textContent = `${data.base_model} @ ${data.base_revision} · ${data.system_prompt} · thinking off`;
+    const sel = $("adapter"); sel.innerHTML = "";
+    for (const a of data.adapters) {
+      const o = document.createElement("option"); o.value = a.name; o.textContent = a.name; sel.appendChild(o);
+    }
+    const b = document.createElement("option"); b.value = "base"; b.textContent = "base (no adapter)"; sel.appendChild(b);
+    if (data.default) sel.value = data.default;
+    $("temperature").value = data.defaults.temperature; $("max_tokens").value = data.defaults.max_tokens;
+    $("input").focus();
+  }
+
+  function setStatus(text, isErr) { $("status").textContent = text; $("status").className = isErr ? "error" : "muted"; }
+
+  function fmtStats(d) {
+    const parts = [`${d.tokens} tokens`, `prompt ${d.prompt_tokens}`, `TTFT ${d.ttft_s.toFixed(2)} s`,
+                   `total ${d.total_s.toFixed(2)} s`];
+    if (d.tok_s) parts.push(`${d.tok_s} tok/s`);
+    if (d.finish_reason && d.finish_reason !== "stop") parts.push(`finish: ${d.finish_reason}`);
+    return parts.join(" · ");
+  }
+
+  async function rewrite() {
+    const text = $("input").value;
+    if (busy || !text.trim()) return;
+    busy = true; $("go").disabled = true;
+    const adapter = $("adapter").value;
+    const compare = $("compare").checked && adapter !== "base";
+    $("outputs").classList.toggle("two", compare);
+    $("panel-base").classList.toggle("hidden", !compare);
+    $("title-main").textContent = adapter === "base" ? "Base model (no adapter)" : `Rewrite · ${adapter}`;
+    for (const s of ["main", "base"]) { $("out-" + s).textContent = ""; $("stats-" + s).textContent = ""; }
+    const t0 = performance.now();
+    let started = false;
+    timer = setInterval(() => {
+      const s = ((performance.now() - t0) / 1000).toFixed(0);
+      if (!started) setStatus(`waiting for the GPU… ${s} s (a cold start takes a few minutes)`);
+    }, 500);
+    try {
+      const res = await api("/api/rewrite", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text, adapter, compare, temperature: Number($("temperature").value),
+                              max_tokens: Number($("max_tokens").value)})});
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "start") {
+            started = true;
+            const e = ev.engine || {};
+            setStatus(`generating… (waited ${ev.queue_s.toFixed(1)} s for the engine` +
+              (ev.queue_s > 20 && e.container_to_ready_s ? `; cold start ${e.container_to_ready_s} s` : "") + ")");
+          } else if (ev.type === "delta") {
+            $("out-" + ev.side).textContent += ev.text;
+          } else if (ev.type === "done") {
+            $("stats-" + ev.side).textContent = fmtStats(ev);
+          } else if (ev.type === "error") {
+            $("stats-" + (ev.side || "main")).innerHTML = "";
+            const sp = document.createElement("span"); sp.className = "error"; sp.textContent = ev.error;
+            $("stats-" + (ev.side || "main")).appendChild(sp);
+          } else if (ev.type === "wall") {
+            setStatus(`done in ${ev.wall_s.toFixed(2)} s wall (incl. queue)`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message !== "unauthorized") setStatus(String(e.message || e), true);
+    } finally {
+      clearInterval(timer); busy = false; $("go").disabled = false;
+    }
+  }
+
+  $("gate-form").addEventListener("submit", (e) => { e.preventDefault(); store.set($("gate-token").value.trim()); $("gate-token").value = ""; boot(); });
+  $("go").addEventListener("click", rewrite);
+  $("input").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") rewrite(); });
+  $("logout").addEventListener("click", () => { store.clear(); showGate(); });
+  $("warm").addEventListener("click", async () => {
+    try { await api("/api/warm", {method: "POST"}); setStatus("GPU container starting; the first rewrite will wait for it."); }
+    catch (e) { if (e.message !== "unauthorized") setStatus(String(e), true); }
+  });
+  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    const t = $("out-" + b.dataset.copy).textContent;
+    try { await navigator.clipboard.writeText(t); b.textContent = "Copied"; }
+    catch (e) { b.textContent = "Copy failed"; }
+    setTimeout(() => { b.textContent = "Copy"; }, 1200);
+  }));
+  boot();
+})();
+</script>
+</body>
+</html>

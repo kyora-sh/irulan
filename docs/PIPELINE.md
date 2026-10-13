@@ -351,3 +351,35 @@ supports Qwen3.8 and is an option if speed matters.
 `data/eval/NAME/test_adapter.jsonl` (`id`, `input`, `model`, `target`), a
 blind side-by-side `test_adapter_blind.md` (A/B in seeded random order) and
 its key, `test_adapter_blind_key.json`.
+
+## Playground
+
+`serve/modal_playground.py` is a small web page for trying an adapter by
+hand: paste text, get the rewrite back, optionally side by side with the base
+model. It runs only under `modal serve` (an ephemeral app; `modal deploy` is
+refused at import) and needs an explicit `MODAL_PROFILE`; on the Atira
+workspace `--env testing` or `--env dev`.
+
+```sh
+MODAL_PROFILE=<profile> modal serve serve/modal_playground.py --env testing
+```
+
+- Engine: vLLM 0.30.0 on the BF16 base (revision pinned) with the run
+  adapters as runtime LoRA, one H100, at most one container, scaled to zero
+  after 5 idle minutes. Inference uses `system_v1`, the chat template with
+  `enable_thinking=False`, top-p 0.8, top-k 20, temperature 0.3 by default.
+- Adapters come from the `irulan-runs` volume: `<run>` (the best adapter) and
+  `<run>@checkpoint-N`. Adapters of another base model are not listed. peft
+  saves the text-only names (`model.layers.N`); the engine renames them to
+  the checkpoint's `model.language_model.layers.N` before loading, since vLLM
+  serves the full `Qwen3_5ForConditionalGeneration` (text-only mode) and a
+  LoRA whose names match no module would silently do nothing.
+- Access: every `/api` route needs the `X-Playground-Token` header, checked
+  in constant time against the `irulan-playground-token` Modal secret
+  (`PLAYGROUND_TOKEN`). The page asks for it once and keeps it in
+  sessionStorage. Loading the page never starts a GPU. Request texts are
+  never logged.
+- Cold start: about 2-2.5 min once the compile caches on the
+  `irulan-playground-cache` volume are filled (the first boot compiles for
+  another ~2-4 min). Modal disables memory and GPU snapshots for ephemeral
+  apps, so they cannot shorten it here.
