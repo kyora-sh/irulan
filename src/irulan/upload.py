@@ -1,6 +1,6 @@
-"""Turn a raw extract into the dataset upload payload, locally.
+"""Turn a raw extract or the studio's pairs into the dataset upload payload, locally.
 
-Each line of data/raw/cc_messages.jsonl becomes one upload record:
+Raw extract (`irulan.raw.v1`): each line of data/raw/cc_messages.jsonl becomes
 
     {"id": "...", "text": "...", "meta": {"source": "claude-code", "session": "<hash>",
                                           "timestamp": "...", "words": n, "lines": n}}
@@ -8,15 +8,29 @@ Each line of data/raw/cc_messages.jsonl becomes one upload record:
 `project` (the transcript directory name, which embeds your local path and
 user name) is not uploaded; `session` is a hash of project and session id, so
 the platform can still split train/val/test by session.
+
+Handwritten pairs (`chat.v1`, for kyora's `sft` recipe): each line of
+data/handwritten/pairs.jsonl becomes one conversation with the system_v1
+instruction `irulan rewrite` sends, the assistant-style text as the user
+turn and your version as the assistant turn:
+
+    {"id": "hw_...", "messages": [{"role": "system", ...}, {"role": "user", "content": input},
+                                  {"role": "assistant", "content": target}],
+     "meta": {"source": "handwritten", "session": "handwritten-<day>", "timestamp": created_at}}
 """
 
 import collections
 import hashlib
 import json
+import re
 
 from . import redact as _redact
+from .rewrite import SYSTEM_PROMPT
 
 FORMAT = "irulan.raw.v1"
+PAIRS_FORMAT = "chat.v1"
+PAIRS_RECIPE = "sft"
+KINDS = ("raw", "pairs")
 
 # kyora's data handling for uploads (docs/API.md, "Data handling").
 POLICY_LINES = (
@@ -48,20 +62,81 @@ def to_upload_record(rec):
     return {"id": rid, "text": text, "meta": meta}
 
 
-def build(path, redact_secrets=False):
+def _text(rec, key, lineno):
+    v = rec.get(key)
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError("line %d: %s must be a non-empty string" % (lineno, key))
+    return v.strip()
+
+
+def to_pair_record(rec, lineno=0):
+    if not isinstance(rec, dict):
+        raise ValueError("line %d: not a pair object" % lineno)
+    rid, inp, tgt = _text(rec, "id", lineno), _text(rec, "input", lineno), _text(rec, "target", lineno)
+    created = rec.get("created_at") if isinstance(rec.get("created_at"), str) else None
+    day = created[:10] if created and re.match(r"\d{4}-\d{2}-\d{2}", created) else None
+    meta = {"source": "handwritten", "session": "handwritten-" + (day or "undated")}
+    if created:
+        meta["timestamp"] = created
+    return {"id": rid,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": inp},
+                         {"role": "assistant", "content": tgt}],
+            "meta": meta}
+
+
+def read_pairs(path):
+    """Pair records from the studio's file. Fails on a line that is not a
+    pair, rather than leaving it out."""
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                raise ValueError("line %d of %s is not JSON" % (lineno, path))
+            out.append(to_pair_record(rec, lineno))
+    return out
+
+
+def _redact_record(r):
+    counts = collections.Counter()
+    if "messages" in r:
+        for m in r["messages"][1:]:
+            m["content"], c = _redact.redact(m["content"])
+            counts.update(c)
+    else:
+        r["text"], c = _redact.redact(r["text"])
+        counts.update(c)
+        r["meta"]["words"] = len(r["text"].split())
+        r["meta"]["lines"] = r["text"].count("\n") + 1
+    return counts
+
+
+def _words(r):
+    if "messages" in r:
+        return sum(len(m["content"].split()) for m in r["messages"][1:])
+    return r["meta"]["words"]
+
+
+def build(path, redact_secrets=False, kind="raw"):
     """Return (jsonl bytes, summary). Nothing leaves the machine here."""
-    records = [to_upload_record(r) for r in read_jsonl(path)]
+    if kind not in KINDS:
+        raise ValueError("kind must be one of %s" % ", ".join(KINDS))
+    if kind == "pairs":
+        records = read_pairs(path)
+    else:
+        records = [to_upload_record(r) for r in read_jsonl(path)]
     redacted = collections.Counter()
     touched = 0
     if redact_secrets:
         for r in records:
-            text, counts = _redact.redact(r["text"])
+            counts = _redact_record(r)
             if counts:
                 touched += 1
                 redacted.update(counts)
-                r["text"] = text
-                r["meta"]["words"] = len(text.split())
-                r["meta"]["lines"] = text.count("\n") + 1
     ids = collections.Counter(r["id"] for r in records)
     dupes = [i for i, n in ids.items() if n > 1]
     if dupes:
@@ -69,10 +144,12 @@ def build(path, redact_secrets=False):
     data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records).encode("utf-8")
     summary = {
         "path": path,
-        "format": FORMAT,
+        "kind": kind,
+        "format": PAIRS_FORMAT if kind == "pairs" else FORMAT,
+        "recipe": PAIRS_RECIPE if kind == "pairs" else None,
         "records": len(records),
         "sessions": len({r["meta"]["session"] for r in records}),
-        "words": sum(r["meta"]["words"] for r in records),
+        "words": sum(_words(r) for r in records),
         "bytes": len(data),
         "redacted_locally": bool(redact_secrets),
         "secrets_redacted": dict(sorted(redacted.items())),
@@ -82,15 +159,17 @@ def build(path, redact_secrets=False):
 
 
 def render_summary(s):
+    unit = "pairs" if s.get("kind") == "pairs" else "messages"
+    recipe = " for the %s recipe" % s["recipe"] if s.get("recipe") else ""
     lines = [
         "dataset file: %s" % s["path"],
-        "  %d messages, %d sessions, %d words, %.1f KB as %s" % (
-            s["records"], s["sessions"], s["words"], s["bytes"] / 1024.0, s["format"]),
+        "  %d %s, %d sessions, %d words, %.1f KB as %s%s" % (
+            s["records"], unit, s["sessions"], s["words"], s["bytes"] / 1024.0, s["format"], recipe),
     ]
     if s["redacted_locally"]:
         n = sum(s["secrets_redacted"].values())
-        lines.append("  local secret redaction: %d replaced in %d messages %s" % (
-            n, s["records_with_secrets_redacted"], json.dumps(s["secrets_redacted"]) if n else ""))
+        lines.append("  local secret redaction: %d replaced in %d %s %s" % (
+            n, s["records_with_secrets_redacted"], unit, json.dumps(s["secrets_redacted"]) if n else ""))
     else:
         lines.append("  local secret redaction: off (pass --redact-secrets-locally to replace obvious credentials)")
     lines.append("")

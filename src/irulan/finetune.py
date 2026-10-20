@@ -39,21 +39,25 @@ class Datasets:
     def __init__(self, client):
         self._c = client
 
-    def upload(self, path, name=None, redact_secrets=False, review="required"):
-        """Upload a raw extract (data/raw/cc_messages.jsonl). The text goes up
-        unscrubbed; the platform scrubs it. `redact_secrets=True` replaces
-        obvious credentials locally first (irulan.redact). `review` is
-        "required" (pair generation waits for POST .../review) or "skip"."""
-        data, summary = _upload.build(path, redact_secrets=redact_secrets)
-        return self.upload_bytes(data, name=name or os.path.basename(path), review=review)
+    def upload(self, path, name=None, redact_secrets=False, review="required", kind="raw"):
+        """Upload a raw extract (kind "raw", data/raw/cc_messages.jsonl) or
+        the studio's handwritten pairs (kind "pairs", sent as chat.v1 for the
+        sft recipe). The text goes up unscrubbed; the platform scrubs it.
+        `redact_secrets=True` replaces obvious credentials locally first
+        (irulan.redact). `review` is "required" (processing waits for
+        POST .../review) or "skip"."""
+        data, summary = _upload.build(path, redact_secrets=redact_secrets, kind=kind)
+        return self.upload_bytes(data, name=name or os.path.basename(path), review=review,
+                                 format=summary["format"], recipe=summary["recipe"])
 
-    def upload_bytes(self, data, name="dataset.jsonl", review="required"):
+    def upload_bytes(self, data, name="dataset.jsonl", review="required", format=_upload.FORMAT, recipe=None):
         if review not in ("required", "skip"):
             raise ValueError("review must be 'required' or 'skip'")
         self._c._t.url("datasets")  # NotAvailableYet before any encoding work
-        body, ctype = multipart(
-            {"purpose": "fine-tune", "format": _upload.FORMAT, "name": name, "review": review},
-            {"file": (name, data, "application/jsonl")})
+        fields = {"purpose": "fine-tune", "format": format, "name": name, "review": review}
+        if recipe:
+            fields["recipe"] = recipe
+        body, ctype = multipart(fields, {"file": (name, data, "application/jsonl")})
         return self._c._t.request("POST", "datasets", data=body, content_type=ctype)
 
     def get(self, dataset_id):

@@ -7,7 +7,7 @@ Local (no network):
 
 kyora (needs IRULAN_BASE_URL and IRULAN_API_KEY; the dataset and fine-tune
 endpoints are planned, see docs/API.md):
-  upload       upload the raw extract as a dataset (asks first)
+  upload       upload the raw extract or handwritten pairs as a dataset (asks first)
   datasets     list | status | review | approve | delete
   finetune     create | status | list | cancel
   models       list the models you can use
@@ -83,13 +83,20 @@ def _confirm(prompt):
 
 
 def cmd_upload(args):
-    path = args.path or os.path.join(_data_dir(), "raw", "cc_messages.jsonl")
+    pairs = args.kind == "pairs"
+    path = args.path or (_studio.default_data(_data_dir()) if pairs
+                         else os.path.join(_data_dir(), "raw", "cc_messages.jsonl"))
     if not os.path.exists(path):
-        print("no raw extract at %s; run `irulan extract` first" % path, file=sys.stderr)
+        print("no %s at %s; run `irulan %s` first" % ("pairs file" if pairs else "raw extract", path,
+                                                       "studio" if pairs else "extract"), file=sys.stderr)
         return EXIT_USAGE
     # The summary goes to stderr and the dataset object to stdout, so scripts
     # can read the result as JSON.
-    data, summary = _upload.build(path, redact_secrets=args.redact_secrets_locally)
+    try:
+        data, summary = _upload.build(path, redact_secrets=args.redact_secrets_locally, kind=args.kind)
+    except ValueError as e:
+        print("irulan: %s" % e, file=sys.stderr)
+        return EXIT_USAGE
     print(_upload.render_summary(summary), file=sys.stderr)
     if args.payload_out:
         with open(args.payload_out, "wb") as f:
@@ -101,11 +108,13 @@ def cmd_upload(args):
     client = _client(args)
     client._t.url("datasets")  # raises NotAvailableYet before asking
     print("destination: %s" % client.base_url, file=sys.stderr)
-    if not args.yes and not _confirm("Upload %d messages to %s? [y/N] " % (summary["records"], client.base_url)):
+    unit = "pairs" if pairs else "messages"
+    if not args.yes and not _confirm("Upload %d %s to %s? [y/N] " % (summary["records"], unit, client.base_url)):
         print("not uploaded: confirm interactively or pass --yes.", file=sys.stderr)
         return EXIT_USAGE
     ds = client.datasets.upload_bytes(data, name=args.name or os.path.basename(path),
-                                      review="skip" if args.skip_review else "required")
+                                      review="skip" if args.skip_review else "required",
+                                      format=summary["format"], recipe=summary["recipe"])
     _print_json(ds)
     return 0
 
@@ -234,17 +243,21 @@ def build_parser():
     _studio.add_arguments(p)
     p.set_defaults(func=cmd_studio)
 
-    p = sub.add_parser("upload", help="upload the raw extract as a dataset (planned API)",
-                       description="Upload the raw extract to kyora as a dataset. The text is NOT scrubbed "
-                                   "locally; the platform scrubs it after upload (docs/API.md). Shows a "
-                                   "summary first and needs --yes or an interactive yes.")
-    p.add_argument("path", nargs="?", help="raw extract (default: DATA_DIR/raw/cc_messages.jsonl)")
+    p = sub.add_parser("upload", help="upload the raw extract or handwritten pairs as a dataset (planned API)",
+                       description="Upload the raw extract (--kind raw) or the studio's handwritten pairs "
+                                   "(--kind pairs, sent as chat.v1 for the sft recipe) to kyora as a dataset. "
+                                   "The text is NOT scrubbed locally; the platform scrubs it after upload "
+                                   "(docs/API.md). Shows a summary first and needs --yes or an interactive yes.")
+    p.add_argument("path", nargs="?", help="file to upload (default: DATA_DIR/raw/cc_messages.jsonl, or "
+                                           "DATA_DIR/handwritten/pairs.jsonl with --kind pairs)")
+    p.add_argument("--kind", choices=_upload.KINDS, default="raw",
+                   help="raw: the extract, for the style-transfer recipe; pairs: the studio's pairs file")
     p.add_argument("--name", help="dataset name (default: the file name)")
     p.add_argument("--redact-secrets-locally", action="store_true",
                    help="replace obvious credentials (API keys, tokens, private keys, JWTs, passwords) "
                         "with <SECRET> before upload; names and hosts are left to the platform")
     p.add_argument("--skip-review", action="store_true",
-                   help="let the platform generate pairs without waiting for your review of its name list")
+                   help="let the platform go on without waiting for your review of its name list")
     p.add_argument("--yes", "-y", action="store_true", help="upload without asking")
     p.add_argument("--dry-run", action="store_true", help="print the summary and stop")
     p.add_argument("--payload-out", metavar="FILE", help="also write the exact payload to FILE for inspection")

@@ -2,7 +2,8 @@
 
 The page shows LLM-assistant-style text of a chosen shape (generated with the
 Codex CLI, or pasted) next to a textarea for your own version of it. Each
-saved pair is one line of DATA_DIR/handwritten/pairs.jsonl.
+saved pair is one line of DATA_DIR/handwritten/pairs.jsonl; upload the file
+with `irulan upload --kind pairs`.
 
 The server binds 127.0.0.1 only, refuses other Host and Origin headers, takes
 JSON bodies only and runs one codex call at a time.

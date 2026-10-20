@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import irulan
 from irulan import cli
 
 from .fakeserver import FakeServer
@@ -224,6 +225,50 @@ class EndToEndTests(unittest.TestCase):
 
             code, out, _ = run(["datasets", "delete", ds["id"], "--yes"], env=env)
             self.assertTrue(json.loads(out)["deleted"])
+
+    def test_upload_handwritten_pairs(self):
+        from irulan.studio import pairs
+        store = pairs.PairStore(os.path.join(self.data, "handwritten", "pairs.jsonl"))
+        a, _ = store.add(pairs.make_record("Could you please restart the quill worker? The password is Fake1234!",
+                                           "restart quill worker pls, pw Fake1234!", "slack_thread_reply", "short",
+                                           created_at="2026-03-04T10:00:00Z"))
+        store.add(pairs.make_record("I wanted to follow up on the review.", "any news on the review?",
+                                    "email_internal", "short", created_at="2026-03-05T10:00:00Z"))
+        env = {"IRULAN_DATA_DIR": self.data}
+        payload = os.path.join(self.tmp, "pairs_payload.jsonl")
+        code, out, err = run(["upload", "--kind", "pairs", "--dry-run", "--redact-secrets-locally",
+                              "--payload-out", payload], env=env)
+        self.assertEqual((code, out), (0, ""), err)
+        self.assertIn("2 pairs, 2 sessions", err)
+        self.assertIn("as chat.v1 for the sft recipe", err)
+        self.assertIn("The original (unscrubbed) upload is not retained.", err)
+        with open(payload, encoding="utf-8") as f:
+            sent = [json.loads(line) for line in f]
+        self.assertEqual(sent[0]["id"], a["id"])
+        self.assertEqual([m["role"] for m in sent[0]["messages"]], ["system", "user", "assistant"])
+        self.assertEqual(sent[0]["messages"][0]["content"], irulan.SYSTEM_PROMPT)
+        self.assertEqual(sent[0]["messages"][2]["content"], "restart quill worker pls, pw Fake1234!")
+        self.assertIn("<SECRET>", sent[0]["messages"][1]["content"])
+        self.assertEqual(sent[0]["meta"], {"source": "handwritten", "session": "handwritten-2026-03-04",
+                                           "timestamp": "2026-03-04T10:00:00Z"})
+        with FakeServer() as srv:
+            env.update(IRULAN_BASE_URL=srv.base_url, IRULAN_API_KEY=srv.api_key)
+            code, out, err = run(["upload", "--kind", "pairs", "--yes"], env=env)
+            self.assertEqual(code, 0, err)
+            ds = json.loads(out)
+            self.assertEqual((ds["format"], ds["recipe"], ds["records"]), ("chat.v1", "sft", 2))
+            run(["datasets", "approve", ds["id"]], env=env)
+            code, out, _ = run(["datasets", "status", ds["id"], "--wait", "ready", "--poll", "0"], env=env)
+            self.assertEqual(json.loads(out)["status"], "ready")
+
+        with open(store.path, "a", encoding="utf-8") as f:
+            f.write('{"id": "hw_x", "input": "only one side"}\n')
+        code, _, err = run(["upload", "--kind", "pairs", "--dry-run"], env={"IRULAN_DATA_DIR": self.data})
+        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertIn("line 3: target must be a non-empty string", err)
+        code, _, err = run(["upload", "--kind", "pairs", "--dry-run"], env={"IRULAN_DATA_DIR": self.tmp})
+        self.assertEqual(code, cli.EXIT_USAGE)
+        self.assertIn("irulan studio", err)
 
     def test_failed_finetune_exits_nonzero(self):
         self.extract()

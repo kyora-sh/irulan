@@ -135,6 +135,31 @@ A dataset is the **raw extract** written by `irulan extract`. The
 - Other `meta` keys are optional. The server MUST ignore keys it does not
   know.
 
+### Handwritten pairs (`chat.v1`)
+
+The pairs `irulan studio` writes are uploaded with `irulan upload --kind
+pairs` as `chat.v1` records for kyora's `sft` recipe, one conversation per
+pair:
+
+```json
+{"id": "hw_3f2a9c0d1e4b5a68",
+ "messages": [{"role": "system", "content": "Rewrite the text in the writer's own voice: terse, direct, short lines. Keep the meaning, asks, facts and numbers. Return only the rewrite."},
+              {"role": "user", "content": "I wanted to follow up and ask whether you might have a moment to review the PR."},
+              {"role": "assistant", "content": "any chance u can look at the pr today?"}],
+ "meta": {"source": "handwritten", "session": "handwritten-2026-01-01", "timestamp": "2026-01-01T10:00:00Z"}}
+```
+
+- `id`: the pair's id, unique within the file.
+- `messages`: the `system_v1` instruction, the assistant-style text as the
+  user turn and the writer's own version as the assistant turn. Every
+  `content` is a non-empty string, and the last turn is the assistant's.
+  The text is **not scrubbed** either.
+- `meta.session` groups the pairs written on one day, so a day's pairs land
+  in one split.
+
+The `sft` recipe has no back-translation, so its stages are `uploaded`,
+`scrubbed` (then the review gate when `review` is `required`) and `ready`.
+
 ### `POST /datasets`
 
 The request is `multipart/form-data` with these parts:
@@ -142,13 +167,15 @@ The request is `multipart/form-data` with these parts:
 | part | value |
 |---|---|
 | `file` | the JSONL, `Content-Type: application/jsonl` |
-| `format` | `irulan.raw.v1` |
+| `format` | `irulan.raw.v1`, or `chat.v1` for handwritten pairs |
 | `name` | display name |
 | `purpose` | `fine-tune` |
 | `review` | `required` (default) or `skip` |
+| `recipe` | optional; the client sends `sft` with `chat.v1` |
 
 The server validates the whole file before it accepts it: UTF-8 JSONL,
-every line an object with a string `id` and a non-empty string `text`, ids
+every line an object with a string `id` and a non-empty string `text` (or,
+for `chat.v1`, valid `messages`), ids
 unique, and size within the limit (SHOULD be at least 100 MB). On an
 invalid file it answers `400` with the 1-based line number in `message` and
 does not keep the file.

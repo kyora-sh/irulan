@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 API_KEY = "test-key-not-real"
 USER = "tester"
 DATASET_FLOW = ("uploaded", "scrubbed", "pairs", "ready")
+SFT_FLOW = ("uploaded", "scrubbed", "ready")
 FT_FLOW = ("queued", "running", "running", "succeeded")
 
 
@@ -152,7 +153,12 @@ class Handler(BaseHTTPRequestHandler):
                 rec = json.loads(line)
             except ValueError:
                 return error(400, "line %d is not JSON" % i, code="invalid_jsonl", param="file")
-            if not isinstance(rec.get("text"), str) or not rec["text"].strip():
+            if fields.get("format") == "chat.v1":
+                msgs = rec.get("messages")
+                if not isinstance(msgs, list) or len(msgs) < 2 or msgs[-1].get("role") != "assistant" or \
+                        not all(isinstance(m.get("content"), str) and m["content"].strip() for m in msgs):
+                    return error(400, "line %d is not a conversation" % i, code="invalid_record", param="file")
+            elif not isinstance(rec.get("text"), str) or not rec["text"].strip():
                 return error(400, "line %d has no text" % i, code="invalid_record", param="file")
             records.append(rec)
         st = self.state
@@ -161,6 +167,7 @@ class Handler(BaseHTTPRequestHandler):
             st.uploads[ds_id] = records
             st.datasets[ds_id] = {
                 "id": ds_id, "object": "dataset", "name": fields.get("name"), "format": fields.get("format"),
+                "recipe": fields.get("recipe") or ("sft" if fields.get("format") == "chat.v1" else "style-transfer"),
                 "status": "uploaded", "records": len(records), "bytes": len(data),
                 "review": {"required": fields.get("review") != "skip", "status": "pending", "candidates": 0},
                 "created_at": int(time.time()), "error": None,
@@ -188,10 +195,11 @@ class Handler(BaseHTTPRequestHandler):
                 st.uploads.pop(ds_id, None)
                 return 200, {"id": ds_id, "object": "dataset", "deleted": True}
             if method == "GET":
-                i = DATASET_FLOW.index(d["status"])
+                flow = SFT_FLOW if d["recipe"] == "sft" else DATASET_FLOW
+                i = flow.index(d["status"])
                 blocked = d["status"] == "scrubbed" and d["review"]["required"] and d["review"]["status"] != "approved"
-                if i + 1 < len(DATASET_FLOW) and not blocked:
-                    d["status"] = DATASET_FLOW[i + 1]
+                if i + 1 < len(flow) and not blocked:
+                    d["status"] = flow[i + 1]
                 return 200, dict(d)
         return error(405, "method not allowed")
 
