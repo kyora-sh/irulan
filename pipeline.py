@@ -2,6 +2,7 @@
 
     python3 -I pipeline.py extract [--src DIR] [--keep-non-english] ...
     python3 -I pipeline.py stats
+    python3 -I pipeline.py studio [--port 8765] [--fake] [--stats]
     python3 -I pipeline.py upload --dry-run
     python3 -I pipeline.py test
 

@@ -22,3 +22,6 @@ Repository = "https://github.com/kyora-sh/irulan"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"irulan.studio" = ["page.html"]

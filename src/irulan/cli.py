@@ -3,6 +3,7 @@
 Local (no network):
   extract      walk ~/.claude/projects and write the raw extract of what you typed
   stats        print the counts of the last extract
+  studio       a local page for writing handwritten pairs (generated with codex, or pasted)
 
 kyora (needs IRULAN_BASE_URL and IRULAN_API_KEY; the dataset and fine-tune
 endpoints are planned, see docs/API.md):
@@ -22,6 +23,7 @@ from . import __version__, errors, upload as _upload
 from .client import Client
 from .pipeline import extract_cc, stats as _stats
 from .rewrite import DEFAULT_MODEL, SYSTEM_VERSION
+from .studio import server as _studio
 
 EXIT_API = 1
 EXIT_USAGE = 2
@@ -63,6 +65,10 @@ def cmd_stats(args):
     with open(path, encoding="utf-8") as f:
         print(_stats.render(json.load(f)))
     return 0
+
+
+def cmd_studio(args):
+    return _studio.run(args)
 
 
 # --- upload ----------------------------------------------------------------
@@ -222,6 +228,11 @@ def build_parser():
     p = sub.add_parser("stats", help="print the counts of the last extract")
     p.add_argument("path", nargs="?", help="stats file (default: DATA_DIR/stats/cc_stats.json)")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("studio", help="a local page for writing handwritten pairs",
+                       description=_studio.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    _studio.add_arguments(p)
+    p.set_defaults(func=cmd_studio)
 
     p = sub.add_parser("upload", help="upload the raw extract as a dataset (planned API)",
                        description="Upload the raw extract to kyora as a dataset. The text is NOT scrubbed "

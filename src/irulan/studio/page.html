@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irulan Studio</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+  --accent: #2f5bd3; --accent-text: #ffffff; --warn: #a15c00; --warn-bg: #fff4e0; --err: #b3261e;
+  --slop-bg: #f1f0ec; --focus: rgba(47, 91, 211, .35);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #e9e8e3; --muted: #9b9a93; --line: #34332f;
+    --accent: #7c9bff; --accent-text: #0e1220; --warn: #f0b45a; --warn-bg: #3a2c14; --err: #ff8a80;
+    --slop-bg: #252522; --focus: rgba(124, 155, 255, .4);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  display: flex; flex-direction: column;
+}
+header {
+  display: flex; align-items: center; gap: 12px; padding: 10px 18px;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+header .count { color: var(--muted); font-size: 13px; }
+header .spacer { flex: 1; }
+.controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.controls label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+select, input[type=text], textarea {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+}
+select:focus, input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
+input[type=text] { min-width: 260px; }
+#custom { min-width: 220px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg input { display: none; }
+.seg span { padding: 5px 10px; font-size: 13px; cursor: pointer; color: var(--text); background: var(--panel); }
+.seg input:checked + span { background: var(--accent); color: var(--accent-text); }
+button {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: inherit; opacity: .7; margin-left: 4px; }
+#status { padding: 6px 18px; font-size: 13px; color: var(--muted); min-height: 30px; display: flex; align-items: center; gap: 8px; }
+#status.err { color: var(--err); }
+.spinner {
+  width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite; display: none;
+}
+.busy .spinner { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 18px 10px; min-height: 0; }
+.pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.pane-head b { font-weight: 600; }
+.pane-head .words { color: var(--muted); }
+.pane-head .spacer { flex: 1; }
+#slop, #slopEdit, #mine {
+  flex: 1; margin: 0; padding: 14px 16px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;
+  border: 0; border-radius: 0 0 8px 8px; resize: none; min-height: 0; font: inherit; line-height: 1.55;
+}
+#slop { background: var(--slop-bg); user-select: text; }
+#slop:empty::before { content: attr(data-empty); color: var(--muted); }
+#slopEdit { background: var(--slop-bg); display: none; }
+.pasting #slop { display: none; }
+.pasting #slopEdit { display: block; }
+#mine { background: var(--panel); }
+.topic { font-size: 12px; color: var(--muted); padding: 6px 12px; border-top: 1px solid var(--line); min-height: 28px; }
+footer { display: flex; align-items: center; gap: 10px; padding: 10px 18px 14px; }
+footer .spacer { flex: 1; }
+footer label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+#warn { margin: 0 18px 8px; padding: 8px 12px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); font-size: 13px; display: none; }
+aside {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--panel);
+  border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.12); display: none; flex-direction: column; z-index: 5;
+}
+aside.open { display: flex; }
+aside .head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+aside .head h2 { font-size: 15px; margin: 0; flex: 1; }
+aside .body { overflow: auto; padding: 8px 16px 16px; }
+.item { border-bottom: 1px solid var(--line); padding: 10px 0; }
+.item .meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.item .meta .spacer { flex: 1; }
+.item .txt { font-size: 13px; white-space: pre-wrap; margin-top: 4px; max-height: 6.5em; overflow: hidden; }
+.item .txt.in { color: var(--muted); }
+.item textarea { width: 100%; min-height: 110px; margin-top: 6px; font-size: 13px; }
+.item input[type=text] { width: 100%; margin-top: 6px; font-size: 13px; }
+.item .row { display: flex; gap: 8px; margin-top: 6px; justify-content: flex-end; }
+pre#statsText { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; margin: 0; }
+@media (max-width: 860px) {
+  main { grid-template-columns: 1fr; }
+  .pane { min-height: 300px; }
+  input[type=text] { min-width: 0; width: 100%; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Irulan Studio</h1>
+  <span class="count" id="count">0 pairs</span>
+  <span class="spacer"></span>
+  <button id="statsBtn">Stats</button>
+  <button id="pairsBtn">Saved pairs</button>
+</header>
+
+<div class="controls">
+  <label>Shape <select id="shape"></select></label>
+  <span class="seg" id="length">
+    <label><input type="radio" name="len" value="short"><span>short</span></label>
+    <label><input type="radio" name="len" value="medium" checked><span>medium</span></label>
+    <label><input type="radio" name="len" value="long"><span>long</span></label>
+  </span>
+  <input type="text" id="custom" placeholder="describe the custom shape" hidden>
+  <input type="text" id="topic" placeholder="topic / context (empty: invent one)">
+  <button class="primary" id="genBtn">Generate<kbd>⌘G</kbd></button>
+  <button id="pasteBtn" title="paste or type the assistant text yourself">Paste my own</button>
+</div>
+
+<div id="status"><span class="spinner"></span><span id="statusText"></span></div>
+
+<main id="main">
+  <section class="pane">
+    <div class="pane-head">
+      <b>Assistant text</b><span class="words" id="slopWords">0 words</span>
+      <span class="spacer"></span><button id="copyBtn">Copy</button>
+    </div>
+    <div id="slop" data-empty="Generate (⌘G) or paste your own assistant-style text."></div>
+    <textarea id="slopEdit" placeholder="Paste the assistant-style text here."></textarea>
+    <div class="topic" id="topicLine"></div>
+  </section>
+  <section class="pane">
+    <div class="pane-head"><b>Your version</b><span class="words" id="mineWords">0 words</span></div>
+    <textarea id="mine" placeholder="Write it the way you would."></textarea>
+  </section>
+</main>
+
+<div id="warn"></div>
+
+<footer>
+  <label><input type="checkbox" id="autoNext"> generate the next one after saving</label>
+  <span class="spacer"></span>
+  <button id="skipBtn">Skip<kbd>Esc</kbd></button>
+  <button class="primary" id="saveBtn">Save<kbd>⌘↵</kbd></button>
+</footer>
+
+<aside id="pairs">
+  <div class="head"><h2>Saved pairs</h2><button data-close>Close</button></div>
+  <div class="body" id="pairList"></div>
+</aside>
+
+<aside id="stats">
+  <div class="head"><h2>Stats</h2><button id="statsRefresh">Refresh</button><button data-close>Close</button></div>
+  <div class="body"><pre id="statsText"></pre></div>
+</aside>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+  if (!isMac) {
+    document.querySelectorAll("kbd").forEach(function (k) { k.textContent = k.textContent.replace("⌘", "Ctrl+").replace("↵", "Enter"); });
+  }
+  var state = { shapes: [], generator: null, pasting: false, busy: false, current: null, counts: { total: 0, by_shape: {} } };
+
+  function store(key, value) {
+    try {
+      if (value === undefined) return JSON.parse(localStorage.getItem("irulan-studio:" + key) || "null");
+      localStorage.setItem("irulan-studio:" + key, JSON.stringify(value));
+    } catch (e) { return null; }
+  }
+
+  function words(t) { t = (t || "").trim(); return t ? t.split(/\s+/).length : 0; }
+  function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
+
+  function api(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        return j;
+      });
+    });
+  }
+
+  function status(text, kind) {
+    $("statusText").textContent = text || "";
+    $("status").className = kind === "busy" ? "busy" : (kind === "err" ? "err" : "");
+  }
+  function warn(list) {
+    var w = $("warn");
+    if (list && list.length) { w.textContent = list.join(" · "); w.style.display = "block"; }
+    else { w.textContent = ""; w.style.display = "none"; }
+  }
+
+  function shapeId() { return $("shape").value; }
+  function lengthVal() { var c = document.querySelector("input[name=len]:checked"); return c ? c.value : "medium"; }
+  function slopText() { return state.pasting ? $("slopEdit").value : $("slop").textContent; }
+
+  function renderCounts() {
+    var c = state.counts, s = shapeId();
+    var label = (state.shapes.find(function (x) { return x.id === s; }) || {}).label || s;
+    $("count").textContent = plural(c.total, "pair") + " · " + (c.by_shape[s] || 0) + " " + label;
+  }
+  function renderWords() {
+    $("slopWords").textContent = plural(words(slopText()), "word");
+    $("mineWords").textContent = plural(words($("mine").value), "word");
+  }
+  function renderTopic() {
+    var c = state.current;
+    $("topicLine").textContent = c && c.topic ? "topic: " + c.topic : "";
+  }
+  function renderGen() {
+    var g = state.generator;
+    var ok = g && g.available;
+    $("genBtn").disabled = !ok || state.busy;
+    if (g && !ok) status("Generation is disabled: " + g.reason + " Pasting your own text still works.", "err");
+  }
+
+  function saveDraft() {
+    store("draft", { slop: slopText(), mine: $("mine").value, pasting: state.pasting, current: state.current });
+  }
+  function setPasting(on) {
+    if (on && !state.pasting) $("slopEdit").value = $("slop").textContent;
+    if (!on && state.pasting) $("slop").textContent = $("slopEdit").value;
+    state.pasting = on;
+    $("main").classList.toggle("pasting", on);
+    $("pasteBtn").textContent = on ? "Done pasting" : "Paste my own";
+    if (on) $("slopEdit").focus();
+    renderWords();
+  }
+  function setSlop(text, current) {
+    $("slop").textContent = text;
+    $("slopEdit").value = text;
+    state.current = current;
+    setPasting(false);
+    renderTopic(); renderWords(); saveDraft();
+  }
+  function clearPair() {
+    setSlop("", null);
+    $("mine").value = "";
+    renderWords(); saveDraft(); warn([]);
+  }
+  function confirmDiscard() {
+    return words($("mine").value) === 0 || confirm("Discard what you wrote on the right?");
+  }
+
+  function generate() {
+    if (state.busy || !(state.generator && state.generator.available)) return;
+    if (!confirmDiscard()) return;
+    var req = { shape: shapeId(), length: lengthVal(), topic: $("topic").value, custom: $("custom").value };
+    state.busy = true; renderGen(); warn([]);
+    status("Generating with " + state.generator.model + "…", "busy");
+    api("POST", "/api/generate", req).then(function (r) {
+      $("mine").value = "";
+      setSlop(r.text, { shape: req.shape, length: req.length, topic: r.topic });
+      status("Generated. Write your version on the right.");
+      $("mine").focus();
+    }).catch(function (e) { status(e.message, "err"); })
+      .then(function () { state.busy = false; renderGen(); });
+  }
+
+  function save() {
+    var input = slopText().trim(), target = $("mine").value.trim();
+    if (!input || !target) { status("Both sides need text before saving.", "err"); return; }
+    var c = state.current && !state.pasting ? state.current : null;
+    var body = {
+      input: input, target: target,
+      shape: c ? c.shape : shapeId(), length: c ? c.length : lengthVal(),
+      topic: c ? c.topic : $("topic").value
+    };
+    api("POST", "/api/pairs", body).then(function (r) {
+      state.counts = r.counts; renderCounts();
+      clearPair();
+      warn(r.warnings);
+      status(r.created ? "Saved (" + plural(r.counts.total, "pair") + ")." : "Already saved; nothing written.");
+      if ($("pairs").classList.contains("open")) loadPairs();
+      if ($("autoNext").checked) generate();
+    }).catch(function (e) { status(e.message, "err"); });
+  }
+
+  function skip() {
+    if (!slopText() && !$("mine").value) return;
+    if (!confirmDiscard()) return;
+    clearPair();
+    status("Skipped.");
+  }
+
+  // ---- saved pairs ----
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  function loadPairs() {
+    api("GET", "/api/pairs").then(function (r) {
+      state.counts = r.counts; renderCounts();
+      var list = $("pairList");
+      list.textContent = "";
+      if (!r.pairs.length) list.appendChild(el("p", "", "Nothing saved yet."));
+      r.pairs.forEach(function (p) { list.appendChild(pairItem(p)); });
+    }).catch(function (e) { status(e.message, "err"); });
+  }
+  function pairItem(p) {
+    var item = el("div", "item");
+    var meta = el("div", "meta");
+    var gen = p.generator === "pasted" ? "pasted" : p.generator.model;
+    meta.appendChild(el("span", "", p.shape + " · " + p.length + " · " + p.created_at.slice(0, 16).replace("T", " ") + " · " + gen));
+    meta.appendChild(el("span", "spacer"));
+    var editB = el("button", "", "Edit"), delB = el("button", "", "Delete");
+    meta.appendChild(editB); meta.appendChild(delB);
+    item.appendChild(meta);
+    if (p.topic) item.appendChild(el("div", "meta", "topic: " + p.topic));
+    var tgt = el("div", "txt", p.target), inp = el("div", "txt in", p.input);
+    item.appendChild(tgt); item.appendChild(inp);
+    delB.onclick = function () {
+      if (!confirm("Delete this pair?")) return;
+      api("DELETE", "/api/pairs/" + p.id).then(function (r) {
+        state.counts = r.counts; renderCounts(); item.remove(); status("Deleted.");
+      }).catch(function (e) { status(e.message, "err"); });
+    };
+    editB.onclick = function () {
+      editB.disabled = true;
+      tgt.style.display = inp.style.display = "none";
+      var t = el("textarea"); t.value = p.target;
+      var i = el("textarea"); i.value = p.input;
+      var tp = el("input"); tp.type = "text"; tp.value = p.topic; tp.placeholder = "topic";
+      var row = el("div", "row"), cancel = el("button", "", "Cancel"), ok = el("button", "primary", "Save edit");
+      row.appendChild(cancel); row.appendChild(ok);
+      item.appendChild(el("div", "meta", "your version")); item.appendChild(t);
+      item.appendChild(el("div", "meta", "assistant text")); item.appendChild(i);
+      item.appendChild(tp); item.appendChild(row);
+      cancel.onclick = loadPairs;
+      ok.onclick = function () {
+        api("PUT", "/api/pairs/" + p.id, { target: t.value, input: i.value, topic: tp.value }).then(function (r) {
+          warn(r.warnings); status("Edited."); loadPairs();
+        }).catch(function (e) { status(e.message, "err"); });
+      };
+      t.focus();
+    };
+    return item;
+  }
+  function loadStats() {
+    api("GET", "/api/stats").then(function (r) { $("statsText").textContent = r.text; })
+      .catch(function (e) { $("statsText").textContent = e.message; });
+  }
+  function toggle(id, loader) {
+    var a = $(id), open = !a.classList.contains("open");
+    document.querySelectorAll("aside").forEach(function (x) { x.classList.remove("open"); });
+    if (open) { a.classList.add("open"); loader(); }
+  }
+  function closeAsides() {
+    var any = false;
+    document.querySelectorAll("aside.open").forEach(function (x) { x.classList.remove("open"); any = true; });
+    return any;
+  }
+
+  // ---- wiring ----
+  $("genBtn").onclick = generate;
+  $("saveBtn").onclick = save;
+  $("skipBtn").onclick = skip;
+  $("pasteBtn").onclick = function () { setPasting(!state.pasting); if (!state.pasting) saveDraft(); };
+  $("copyBtn").onclick = function () {
+    var t = slopText();
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(
+      function () { status("Copied."); },
+      function () { var r = document.createRange(); r.selectNodeContents($("slop")); var s = getSelection(); s.removeAllRanges(); s.addRange(r); status("Selected; press copy."); });
+  };
+  $("pairsBtn").onclick = function () { toggle("pairs", loadPairs); };
+  $("statsBtn").onclick = function () { toggle("stats", loadStats); };
+  $("statsRefresh").onclick = loadStats;
+  document.querySelectorAll("[data-close]").forEach(function (b) { b.onclick = closeAsides; });
+  $("shape").onchange = function () {
+    $("custom").hidden = shapeId() !== "custom";
+    renderCounts(); store("shape", shapeId());
+  };
+  $("length").onchange = function () { store("length", lengthVal()); };
+  $("autoNext").onchange = function () { store("autoNext", $("autoNext").checked); };
+  $("mine").oninput = function () { renderWords(); saveDraft(); };
+  $("slopEdit").oninput = function () { state.current = null; renderTopic(); renderWords(); saveDraft(); };
+
+  document.addEventListener("keydown", function (e) {
+    var mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key === "Enter") { e.preventDefault(); save(); }
+    else if (mod && (e.key === "g" || e.key === "G")) { e.preventDefault(); generate(); }
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      if (closeAsides()) return;
+      if (document.activeElement && document.activeElement.closest && document.activeElement.closest("aside")) return;
+      skip();
+    }
+  });
+
+  api("GET", "/api/status").then(function (s) {
+    state.shapes = s.shapes; state.generator = s.generator; state.counts = s.counts;
+    s.shapes.forEach(function (sh) {
+      var o = document.createElement("option");
+      o.value = sh.id; o.textContent = sh.label;
+      o.title = sh.structure + (sh.tone ? " Tone: " + sh.tone + "." : "");
+      $("shape").appendChild(o);
+    });
+    var sh = store("shape"); if (sh && s.shapes.some(function (x) { return x.id === sh; })) $("shape").value = sh;
+    var ln = store("length"); if (ln) { var r = document.querySelector("input[name=len][value=" + ln + "]"); if (r) r.checked = true; }
+    $("autoNext").checked = !!store("autoNext");
+    $("custom").hidden = shapeId() !== "custom";
+    var d = store("draft");
+    if (d) {
+      $("slop").textContent = d.slop || ""; $("slopEdit").value = d.slop || "";
+      $("mine").value = d.mine || ""; state.current = d.current || null;
+      if (d.pasting) setPasting(true);
+    }
+    renderCounts(); renderWords(); renderTopic(); renderGen();
+    if (s.generator.available) status("Ready. Pairs go to " + s.data + ".");
+  }).catch(function (e) { status("Could not reach the studio server: " + e.message, "err"); });
+})();
+</script>
+</body>
+</html>

@@ -75,7 +75,7 @@ class SmokeTests(unittest.TestCase):
     def test_help_for_every_command(self):
         code, out, _ = run(["--help"])
         self.assertEqual(code, 0)
-        for cmd in ("extract", "stats", "upload", "datasets", "finetune", "models", "rewrite"):
+        for cmd in ("extract", "stats", "studio", "upload", "datasets", "finetune", "models", "rewrite"):
             self.assertIn(cmd, out)
             self.assertEqual(run([cmd, "--help"])[0], 0, cmd)
         for sub in (["finetune", "create"], ["finetune", "status"], ["finetune", "list"], ["finetune", "cancel"],
