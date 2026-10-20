@@ -1,6 +1,7 @@
 """Build the training set from a pairs file.
 
     python3 -I pipeline.py prepare --pairs data/pairs/<run>.jsonl [--out data/train] ...
+    python3 -I pipeline.py prepare --pairs data/pairs/<run>.jsonl --extra-pairs data/handwritten/pairs.jsonl
 
 Per pair, in order:
 
@@ -18,6 +19,12 @@ Per pair, in order:
 7. replace each placeholder with an invented surrogate (the same one for the
    n-th <NAME> of the input and the n-th <NAME> of the target), seeded per
    pair id, so the model never learns to emit placeholder tokens.
+
+Handwritten pairs from the studio (`--extra-pairs`, records with `source:
+"handwritten"`) need no clean-extract session: each day's pairs form one
+session (`handwritten/<date>`), and the length and markdown checks that guard
+generated inputs (`shorter`, `too_long`, `markdown_in_plain`) do not drop
+them, since the writer chose both sides.
 
 The rest is split by session (train/val/test 90/5/5, fixed seed) and written
 as chat-format jsonl with a versioned system prompt. stats.json holds counts
@@ -59,6 +66,10 @@ META_PREAMBLE_RE = re.compile(
     r"|i(?:'ve| have)\s+rewritten\b"
     r")"
 )
+
+# A person wrote the target against free-form assistant text, so compression
+# beyond 4x and markdown in the input are the point, not generator mistakes.
+HANDWRITTEN_ALLOW_FLAGS = ("shorter", "too_long", "markdown_in_plain")
 
 SPLITS = ("train", "val", "test")
 DEFAULT_RATIOS = (0.90, 0.05, 0.05)
@@ -153,6 +164,11 @@ def load_sessions(path):
                 continue
             out[r["id"]] = "%s/%s" % (r.get("project", ""), r.get("session_id", ""))
     return out
+
+
+def handwritten_sessions(records):
+    """{id: "handwritten/<date>"} for studio records, one session per day."""
+    return {r["id"]: "handwritten/%s" % (r.get("created_at") or "")[:10] for r in records if r.get("id")}
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +312,7 @@ def prepare(pairs, scrubber, sessions=None, exclude=(), allow_flags=DEFAULT_ALLO
     surrogated = collections.Counter()
     pairs_with_surrogates = 0
     allow = set(allow_flags)
+    hw_allow = allow | set(HANDWRITTEN_ALLOW_FLAGS)
     seen_inputs = set()
     kept = []
     sessions = sessions if sessions is not None else {}
@@ -324,7 +341,7 @@ def prepare(pairs, scrubber, sessions=None, exclude=(), allow_flags=DEFAULT_ALLO
         # wrote where the target has <URL> is not a placeholder mismatch.
         flags = check_pairs.check(dict(p, input=inp, target=tgt))
         flagged.update(flags)
-        bad = [f for f in flags if f not in allow]
+        bad = [f for f in flags if f not in (hw_allow if p.get("source") == "handwritten" else allow)]
         if bad:
             drop(p, "flag_" + bad[0])
             continue
@@ -378,6 +395,8 @@ def prepare(pairs, scrubber, sessions=None, exclude=(), allow_flags=DEFAULT_ALLO
         "splits": {k: {"pairs": len(out[k]), "sessions": len(sess_per_split[k]),
                        "est_tokens": sum(tok[k]), "est_target_tokens": sum(tgt_tok[k])} for k in SPLITS},
         "sessions": len(sizes),
+        "handwritten": {"read": sum(1 for p in pairs if p.get("source") == "handwritten"),
+                        "kept": sum(1 for p, _, _, _ in kept if p.get("source") == "handwritten")},
         "system_version": system_version,
         "seed": seed,
         "tokens": {
@@ -415,6 +434,9 @@ def render(stats):
     lines.append("  tokens (%s): mean %s, p50 %d, p95 %d, max %d; %d (%.1f%%) over %d" % (
         t["method"], t["mean"], t["p50"], t["p95"], t["max"], t["over_max_seq_len"],
         100 * t["share_over"], t["max_seq_len"]))
+    hw = stats.get("handwritten") or {}
+    if hw.get("read"):
+        lines.append("  handwritten: kept %d of %d" % (hw["kept"], hw["read"]))
     su = stats["surrogates"]
     lines.append("  surrogates: %d placeholders in %d pairs %s" % (su["placeholders"], su["pairs"], json.dumps(su["by_type"])))
     if stats["rescrub_new_replacements"]:
@@ -424,7 +446,9 @@ def render(stats):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="prepare", description=__doc__.split("\n\n")[0])
-    ap.add_argument("--pairs", required=True, nargs="+", help="pairs jsonl file(s)")
+    ap.add_argument("--pairs", nargs="+", default=[], help="generated pairs jsonl file(s)")
+    ap.add_argument("--extra-pairs", nargs="+", default=[],
+                    help="handwritten pairs from the studio, e.g. data/handwritten/pairs.jsonl")
     ap.add_argument("--out", default=os.path.join(ROOT, "data/train"))
     ap.add_argument("--clean", default=os.path.join(ROOT, "data/clean/cc_messages.jsonl"),
                     help="clean extract, for session ids")
@@ -439,14 +463,22 @@ def main(argv=None):
     ap.add_argument("--keep-missing-session", action="store_true",
                     help="keep pairs whose id is not in the clean extract (each is its own session)")
     args = ap.parse_args(argv)
+    if not args.pairs and not args.extra_pairs:
+        ap.error("give --pairs and/or --extra-pairs")
 
-    pairs, bad = [], 0
+    pairs, bad, extra = [], 0, []
     for path in args.pairs:
         p, b = read_pairs(path)
         pairs.extend(p)
         bad += b
+    for path in args.extra_pairs:
+        p, b = read_pairs(path)
+        extra.extend(r for r in p if r.get("source") == "handwritten")
+        bad += b + sum(1 for r in p if r.get("source") != "handwritten")
+    pairs.extend(extra)
     scrubber = Scrubber.from_files(args.denylist)
     sessions = load_sessions(args.clean)
+    sessions.update(handwritten_sessions(extra))
     exclude = load_exclude_ids(args.exclude)
     allow = [f for f in args.allow_flags.split(",") if f.strip()]
     unknown = [f for f in allow if f not in check_pairs.FLAGS]
@@ -457,7 +489,7 @@ def main(argv=None):
         min_target_words=args.min_target_words, seed=args.seed, system_version=args.system,
         max_seq_len=args.max_seq_len, require_session=not args.keep_missing_session)
     stats["bad_lines"] = bad
-    stats["sources"] = [os.path.basename(p) for p in args.pairs]
+    stats["sources"] = [os.path.basename(p) for p in args.pairs + args.extra_pairs]
     stats["denylist_terms"] = len(scrubber.denylist)
     stats["exclude_ids"] = len(exclude)
     os.makedirs(args.out, exist_ok=True)

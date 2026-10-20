@@ -1,6 +1,6 @@
 PY := python3 -I
 
-.PHONY: extract-cc rescrub stats test generate check-pairs sample review prepare train-dry-run
+.PHONY: extract-cc rescrub stats test generate check-pairs sample review prepare studio studio-stats train-dry-run
 
 # Walk ~/.claude/projects, write data/raw + data/clean + entity candidates.
 # Pass filter flags via ARGS, e.g. ARGS="--keep-non-english".
@@ -35,8 +35,16 @@ review:
 	$(PY) pipeline.py review $(ARGS)
 
 # Training set from a pairs file: make prepare ARGS="--pairs data/pairs/full_sol_v2.jsonl"
+# (add --extra-pairs data/handwritten/pairs.jsonl for the studio's pairs)
 prepare:
 	$(PY) pipeline.py prepare $(ARGS)
+
+# Local page for handwritten pairs: make studio ARGS="--port 8765"
+studio:
+	$(PY) pipeline.py studio $(ARGS)
+
+studio-stats:
+	$(PY) pipeline.py studio --stats $(ARGS)
 
 # Check data/train and print the cost estimate. Local, no Modal, no GPU.
 train-dry-run:

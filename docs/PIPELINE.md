@@ -211,10 +211,59 @@ from a call that ran tools. `sample` picks 15 messages of 15-29 words, 20 of
 between the two variants; `review` writes a side-by-side markdown file and a
 per-model summary to `data/review/`.
 
+## Studio: handwritten pairs
+
+```sh
+make studio              # or: python3 -I pipeline.py studio [--port 8765]
+make studio-stats        # or: python3 -I pipeline.py studio --stats
+```
+
+A local page (stdlib `http.server` plus one static HTML file, bound to
+127.0.0.1 only, no external assets) for writing pairs by hand. Pick a shape
+(PR description, review comment, issue, Slack status or thread reply,
+internal or customer email, design doc section, incident summary, release
+notes, LinkedIn post, tweet or thread, commit message, standup, or a custom
+one you describe), a length and an optional topic. Generate (Cmd/Ctrl+G)
+makes one `codex exec` call with `gpt-6.1-sol` at low effort through
+`generate.CodexBackend`, so it runs from an empty temp dir with the same
+flags as step 2. The prompt (`studio.PROMPTS`, version `studio_v1`) asks for
+assistant-register text with invented specifics (numbers, service names,
+relative paths, versions); with no topic, the model invents one in a random
+area and reports it on a `TOPIC:` line that is stored, not shown as text.
+Only one generation runs at a time. If codex is missing or not logged in,
+generation is disabled and "Paste my own" still works.
+
+Write your version on the right and save (Cmd/Ctrl+Enter); Esc skips. Each
+save appends one line to `data/handwritten/pairs.jsonl` (`--data` to
+change):
+
+```json
+{"id": "hw_<16 hex of sha256(input, target)>", "source": "handwritten",
+ "shape": "pr_description", "length": "medium", "topic": "...",
+ "generator": {"backend": "codex", "model": "gpt-6.1-sol", "prompt_version": "studio_v1"},
+ "input": "<assistant-style text>", "target": "<your version>", "created_at": "...Z"}
+```
+
+`generator` is `"pasted"` unless the saved input is exactly a text this
+server generated. "Saved pairs" lists them newest first with edit and delete
+(the file is rewritten through a temp file and `os.replace`); an edit
+recomputes the id. Save and edit also run the pair through `prepare` and
+warn if it would be dropped, for example when a URL or a denylisted name is
+on one side only. "Stats" (or `--stats`) prints counts per shape, length and
+generator, word counts and what `prepare` would keep.
+
+Into training: `prepare --extra-pairs data/handwritten/pairs.jsonl`
+(alongside or instead of `--pairs`). Handwritten records need no
+`data/clean` session: each day's pairs are one session,
+`handwritten/<date>`. The `shorter`, `too_long` and `markdown_in_plain`
+checks do not drop them; everything else (rescrub, placeholder surrogates,
+duplicates, the split) applies as for generated pairs.
+
 ## Step 3: the training set
 
 ```sh
 make prepare ARGS="--pairs data/pairs/full_sol_v2.jsonl"
+make prepare ARGS="--pairs data/pairs/full_sol_v2.jsonl --extra-pairs data/handwritten/pairs.jsonl"
 ```
 
 `irulan/prepare.py` turns a pairs file into `data/train/` (git-ignored). It

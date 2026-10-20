@@ -11,7 +11,8 @@ directory explicitly and dispatches to the package.
     python3 -I pipeline.py check-pairs data/pairs/NAME.jsonl ...
     python3 -I pipeline.py sample
     python3 -I pipeline.py review --runs data/pairs/A.jsonl data/pairs/B.jsonl
-    python3 -I pipeline.py prepare --pairs data/pairs/NAME.jsonl [--out data/train] ...
+    python3 -I pipeline.py prepare --pairs data/pairs/NAME.jsonl [--extra-pairs data/handwritten/pairs.jsonl] ...
+    python3 -I pipeline.py studio [--port 8765] [--stats]
 """
 
 import os
@@ -53,6 +54,9 @@ def main():
     elif cmd == "prepare":
         from irulan import prepare
         prepare.main(rest)
+    elif cmd == "studio":
+        from irulan import studio
+        sys.exit(studio.main(rest))
     elif cmd == "test":
         import unittest
         suite = unittest.defaultTestLoader.discover(os.path.join(HERE, "tests"), top_level_dir=HERE)
