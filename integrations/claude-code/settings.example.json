@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(gh *)",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/irulan_rewrite_hook.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

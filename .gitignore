@@ -1,0 +1,15 @@
+# Extracted data never goes into git: this repo is public.
+data/
+*.local.*
+
+# Local secrets, never in git.
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
