@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irulan"
+version = "0.1.0"
+description = "Prepare a dataset of your own writing locally, fine-tune your own irulan model on kyora, and rewrite text with it."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+]
+
+[project.scripts]
+irulan = "irulan.cli:main"
+
+[project.urls]
+Repository = "https://github.com/kyora-sh/irulan"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"irulan.studio" = ["page.html"]
